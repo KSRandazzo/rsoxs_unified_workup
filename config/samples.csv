@@ -1,0 +1,2 @@
+sample_id,sample_name,diameter_nm,np_vendor,mw_g_mol,mn_g_mol,pdi,polymer,wash_state
+ksr216,KSR-216,50,Nanocomposix,259000,253500,1.02,PS,unwashed

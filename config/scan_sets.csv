@@ -1,0 +1,2 @@
+scan_set_id,sample_id,scan_type,beam_decay_status,proposal,cycle,adc_mode
+ksr216_2026apr_repeats_01,ksr216,repeats,No beam decay,319665,2026-1,4adc
