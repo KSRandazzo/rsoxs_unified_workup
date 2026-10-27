@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rsoxs-unified-workup"
+version = "0.1.0"
+description = "Reusable and reproducible RSoXS scan workup"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.3,<3",
+    "xarray>=2025.7",
+    "PyHyperScattering==0.2.10",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
