@@ -11,6 +11,7 @@ TABLE_FILES = {
     "scan_sets": "scan_sets.csv",
     "scans": "scans.csv",
     "polarization_pairs": "polarization_pairs.csv",
+    "anisotropy_sectors": "anisotropy_sectors.csv",
 }
 
 
@@ -88,6 +89,11 @@ def load_scan_set(scan_set_id, config_dir=None):
         tables["polarization_pairs"]["scan_set_id"] == scan_set_id
     ]
 
+    sectors = tables["anisotropy_sectors"].loc[
+        tables["anisotropy_sectors"]["scan_set_id"]
+        == scan_set_id
+    ]
+
     if scans.empty:
         raise ValueError(f"No scans found for scan set {scan_set_id!r}")
 
@@ -99,5 +105,8 @@ def load_scan_set(scan_set_id, config_dir=None):
         "processing": read_processing_config(
             scan_set_id,
             config_dir,
+        ),
+        "anisotropy_sectors": sectors.to_dict(
+            orient="records"
         ),
     }

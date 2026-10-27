@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LogNorm
-from matplotlib.patches import Circle
+from matplotlib.patches import Circle, Patch, Wedge
 import matplotlib.ticker as mticker
 
 
@@ -1142,6 +1142,256 @@ def plot_flux_correction_review(
                 f"{first_scan['sample_name']}: "
                 f"{first_scan['base_description']}",
                 fontsize=15,
+            )
+
+            plt.show()
+            plt.close(fig)
+
+
+def plot_anisotropy_review(
+    scans,
+    anisotropy_results,
+    vmin=-0.05,
+    vmax=0.05,
+):
+    """Plot every configured sector for each normalization."""
+    first_scan = next(iter(scans.values()))
+
+    for mode, sector_results in (
+        anisotropy_results.items()
+    ):
+        sector_count = len(sector_results)
+        column_count = min(4, sector_count)
+        row_count = int(
+            np.ceil(sector_count / column_count)
+        )
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                row_count,
+                column_count,
+                figsize=(
+                    6 * column_count,
+                    5 * row_count,
+                ),
+                constrained_layout=True,
+            )
+            axes = np.atleast_1d(axes).flatten()
+
+            for axis, sector in zip(
+                axes,
+                sector_results.values(),
+            ):
+                values = sector["anisotropy"]
+                image = axis.pcolormesh(
+                    values["q"],
+                    values["energy"],
+                    values,
+                    shading="auto",
+                    cmap="coolwarm",
+                    vmin=vmin,
+                    vmax=vmax,
+                )
+                axis.set_title(
+                    f"{sector['label']}\n"
+                    f"χ center="
+                    f"{sector['chi_center_deg']:g}°, "
+                    f"halfwidth="
+                    f"{sector['chi_halfwidth_deg']:g}°\n"
+                    f"parallel="
+                    f"{sector['parallel_polarization']}°, "
+                    f"perpendicular="
+                    f"{sector['perpendicular_polarization']}°"
+                )
+                axis.set_xlabel("q (Å⁻¹)")
+                axis.set_ylabel("Energy (eV)")
+
+            for unused_axis in axes[sector_count:]:
+                unused_axis.remove()
+
+            fig.colorbar(
+                image,
+                ax=axes[:sector_count].tolist(),
+                shrink=0.7,
+                label="Anisotropy",
+            )
+            fig.suptitle(
+                f"Anisotropy by sector using "
+                f"{mode.replace('_', ' ')} normalization\n"
+                f"{first_scan['sample_name']}: "
+                f"{first_scan['base_description']}",
+                fontsize=16,
+            )
+
+            plt.show()
+            plt.close(fig)
+
+
+def plot_anisotropy_sector_overlays(
+    scans,
+    configuration,
+    anisotropy_results,
+    energy_value=None,
+):
+    """Overlay configured anisotropy sectors on detector frames."""
+    processing = configuration["processing"]
+    shared_center = processing["shared_beam_center"]
+    center = (
+        shared_center["center_x"],
+        shared_center["center_y"],
+    )
+    scan_by_id = {
+        int(record["scan_id"]): record
+        for record in configuration["scans"]
+    }
+    full_ring_sectors = anisotropy_results["full_ring"]
+
+    for pair in configuration["polarization_pairs"]:
+        sectors = [
+            sector
+            for sector in full_ring_sectors.values()
+            if sector["pair_id"] == pair["pair_id"]
+        ]
+        if not sectors:
+            continue
+
+        polarizations = [
+            scan_by_id[int(pair["scan_id_1"])][
+                "polarization_deg"
+            ],
+            scan_by_id[int(pair["scan_id_2"])][
+                "polarization_deg"
+            ],
+        ]
+        polarizations = [
+            int(value)
+            if float(value).is_integer()
+            else float(value)
+            for value in polarizations
+        ]
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                2,
+                len(sectors),
+                figsize=(5 * len(sectors), 10),
+                constrained_layout=True,
+            )
+            axes = np.asarray(
+                axes,
+                dtype=object,
+            ).reshape(2, len(sectors))
+
+            for row, polarization in enumerate(
+                polarizations
+            ):
+                scan_record = scans[polarization]
+                data = scan_record["masked_data_final"]
+                energies = np.asarray(
+                    data.energy.values,
+                    dtype=float,
+                )
+
+                if energy_value is None:
+                    energy_index = 0
+                else:
+                    energy_index = int(
+                        np.argmin(
+                            np.abs(
+                                energies - energy_value
+                            )
+                        )
+                    )
+
+                frame = data.isel(system=energy_index)
+                radius = float(
+                    np.hypot(
+                        frame.sizes["pix_x"],
+                        frame.sizes["pix_y"],
+                    )
+                )
+
+                for column, sector in enumerate(
+                    sectors
+                ):
+                    axis = axes[row, column]
+                    axis.imshow(
+                        frame,
+                        norm=LogNorm(vmin=1e2, vmax=1e5),
+                        cmap="jet",
+                        origin="lower",
+                    )
+
+                    is_parallel = (
+                        polarization
+                        == sector[
+                            "parallel_polarization"
+                        ]
+                    )
+                    color = (
+                        "purple"
+                        if is_parallel
+                        else "white"
+                    )
+                    axis.add_patch(
+                        Wedge(
+                            center=center,
+                            r=radius,
+                            theta1=(
+                                sector["chi_center_deg"]
+                                - sector[
+                                    "chi_halfwidth_deg"
+                                ]
+                            ),
+                            theta2=(
+                                sector["chi_center_deg"]
+                                + sector[
+                                    "chi_halfwidth_deg"
+                                ]
+                            ),
+                            facecolor=color,
+                            alpha=0.4,
+                        )
+                    )
+                    axis.set_title(
+                        f"{sector['label']}; "
+                        f"polarization={polarization}°\n"
+                        f"{'parallel' if is_parallel else 'perpendicular'}; "
+                        f"halfwidth="
+                        f"{sector['chi_halfwidth_deg']:g}°"
+                    )
+                    axis.set_xlim(0, frame.sizes["pix_x"])
+                    axis.set_ylim(0, frame.sizes["pix_y"])
+                    axis.set_aspect("equal")
+                    axis.set_xticks([])
+                    axis.set_yticks([])
+
+            first_scan = scans[polarizations[0]]
+            fig.legend(
+                handles=[
+                    Patch(
+                        facecolor="purple",
+                        alpha=0.4,
+                        label="Parallel",
+                    ),
+                    Patch(
+                        facecolor="white",
+                        edgecolor="gray",
+                        alpha=0.4,
+                        label="Perpendicular",
+                    ),
+                ],
+                loc="upper right",
+                fontsize=11,
+            )
+            fig.suptitle(
+                f"Anisotropy-sector review for "
+                f"{pair['pair_id']}\n"
+                f"{first_scan['sample_name']}: "
+                f"{first_scan['base_description']}\n"
+                f"Energy={energies[energy_index]:g} eV; "
+                f"purple=parallel, white=perpendicular",
+                fontsize=16,
             )
 
             plt.show()
