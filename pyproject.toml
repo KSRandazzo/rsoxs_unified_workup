@@ -8,10 +8,14 @@ version = "0.1.0"
 description = "Reusable and reproducible RSoXS scan workup"
 requires-python = ">=3.11"
 dependencies = [
+    "httpx",
+    "matplotlib",
+    "numpy",
     "pandas>=2.3,<3",
-    "xarray>=2025.7",
     "PyHyperScattering==0.2.10",
+    "scikit-image",
+    "tiled",
+    "xarray>=2025.7",
 ]
-
 [tool.setuptools.packages.find]
 where = ["src"]

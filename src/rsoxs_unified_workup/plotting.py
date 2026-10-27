@@ -186,3 +186,94 @@ def plot_dark_masks(scans, dark_masks):
 
     plt.show()
     plt.close(fig)
+
+
+def plot_static_mask_overlays(
+    scans,
+    static_masks,
+    beamstop_vertices,
+    vmin=1e0,
+    vmax=1e9,
+    cmap="plasma",
+):
+    """Compare raw summed frames with their static masks."""
+    row_count = len(scans)
+
+    fig, axes = plt.subplots(
+        row_count,
+        2,
+        figsize=(14, 6 * row_count),
+        constrained_layout=True,
+    )
+    axes = np.atleast_2d(axes)
+
+    closed_vertices = np.vstack(
+        [beamstop_vertices, beamstop_vertices[0]]
+    )
+
+    for row, (polarization, scan_data) in enumerate(
+        scans.items()
+    ):
+        data = scan_data["data"]
+        frame_dimension = data.energy.dims[0]
+        summed_frame = data.sum(frame_dimension).values
+        mask = static_masks[polarization].values
+
+        raw_image = axes[row, 0].imshow(
+            summed_frame,
+            norm=LogNorm(vmin=vmin, vmax=vmax),
+            cmap=cmap,
+            origin="lower",
+        )
+        axes[row, 0].plot(
+            closed_vertices[:, 0],
+            closed_vertices[:, 1],
+            color="fuchsia",
+            linewidth=2,
+        )
+        axes[row, 0].set_title(
+            f"{scan_data['sample_name']}: "
+            f"Scan {scan_data['scan_id']}, "
+            f"polarization={polarization}°\n"
+            f"Raw sum with beamstop outline"
+        )
+
+        masked_frame = np.ma.masked_where(
+            mask,
+            summed_frame,
+        )
+        axes[row, 1].imshow(
+            masked_frame,
+            norm=LogNorm(vmin=vmin, vmax=vmax),
+            cmap=cmap,
+            origin="lower",
+        )
+        axes[row, 1].set_title(
+            f"{scan_data['sample_name']}: "
+            f"Scan {scan_data['scan_id']}, "
+            f"polarization={polarization}°\n"
+            f"After static mask"
+        )
+
+        for axis in axes[row]:
+            axis.set_aspect("equal")
+            axis.set_xlabel("Pixel x")
+            axis.set_ylabel("Pixel y")
+
+    fig.colorbar(
+        raw_image,
+        ax=axes,
+        shrink=0.5,
+        label="Summed intensity",
+    )
+
+    first_scan = next(iter(scans.values()))
+    fig.suptitle(
+        f"Static-mask review\n"
+        f"{first_scan['sample_name']}: "
+        f"{first_scan['base_description']}",
+        fontsize=16,
+    )
+
+    plt.show()
+    plt.close(fig)

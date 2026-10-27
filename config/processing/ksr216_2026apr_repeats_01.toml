@@ -1,2 +1,16 @@
 [darks]
 upper_percentile = 99.98
+union_across_polarizations = true
+
+[beamstop]
+center_x = 743
+center_y = 189
+length = 900
+width = 54
+angle_degrees = -50
+
+[detector_borders]
+left_pixels = 3
+right_pixels = 3
+bottom_pixels = 6
+top_pixels = 6
