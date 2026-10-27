@@ -1042,3 +1042,107 @@ def plot_normalization_review(
 
             plt.show()
             plt.close(fig)
+
+
+def plot_flux_correction_review(
+    scans,
+    integration_results,
+    flux_results,
+):
+    """Review Au-mesh flux values and corrected intensities."""
+    first_scan = next(iter(scans.values()))
+    first_result = next(iter(flux_results.values()))
+
+    with plt.style.context("dark_background"):
+        fig, axis = plt.subplots(
+            1,
+            1,
+            figsize=(7, 5),
+            constrained_layout=True,
+        )
+
+        for polarization, result in flux_results.items():
+            flux = result["flux"]
+            axis.plot(
+                flux.energy,
+                flux,
+                marker="o",
+                label=(
+                    f"{polarization}°; "
+                    f"scan {scans[polarization]['scan_id']}"
+                ),
+            )
+
+        axis.set_title("Au mesh current")
+        axis.set_xlabel("Energy (eV)")
+        axis.set_ylabel("Au mesh current")
+        axis.legend()
+        fig.suptitle(
+            f"Incident-flux monitor review\n"
+            f"{first_scan['sample_name']}: "
+            f"{first_scan['base_description']}",
+            fontsize=15,
+        )
+
+        plt.show()
+        plt.close(fig)
+
+    for energy in first_result[
+        "flux_corrected"
+    ].energy.values:
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                1,
+                2,
+                figsize=(14, 5),
+                constrained_layout=True,
+            )
+
+            for polarization, flux_result in (
+                flux_results.items()
+            ):
+                raw_mean = integration_results[
+                    polarization
+                ]["clean"].sel(
+                    energy=energy
+                ).mean("chi", skipna=True)
+                corrected_mean = flux_result[
+                    "flux_corrected"
+                ].sel(
+                    energy=energy
+                ).mean("chi", skipna=True)
+                label = (
+                    f"{polarization}°; "
+                    f"scan {scans[polarization]['scan_id']}"
+                )
+
+                axes[0].plot(
+                    raw_mean["q"],
+                    raw_mean,
+                    label=label,
+                )
+                axes[1].plot(
+                    corrected_mean["q"],
+                    corrected_mean,
+                    label=label,
+                )
+
+            axes[0].set_title("Before flux correction")
+            axes[1].set_title("After flux correction")
+
+            for axis in axes:
+                axis.set_yscale("log")
+                axis.set_xlabel("q (Å⁻¹)")
+                axis.set_ylabel("Chi-averaged intensity")
+                axis.legend(fontsize=8)
+
+            fig.suptitle(
+                f"Flux-correction review at "
+                f"{float(energy):g} eV\n"
+                f"{first_scan['sample_name']}: "
+                f"{first_scan['base_description']}",
+                fontsize=15,
+            )
+
+            plt.show()
+            plt.close(fig)

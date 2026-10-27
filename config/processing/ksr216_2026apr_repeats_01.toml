@@ -49,3 +49,6 @@ postmask_threshold = 1.0
 [normalization]
 half_ring_center_degrees = 180
 half_ring_halfwidth_degrees = 90
+
+[flux_correction]
+enabled = true

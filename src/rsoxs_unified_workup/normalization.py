@@ -1,4 +1,5 @@
 import numpy as np
+import xarray as xr
 
 
 def wrap_chi(values):
@@ -100,6 +101,93 @@ def normalize_scan_set(
         polarization: normalize_scan(
             integration_result=result,
             settings=settings,
+        )
+        for polarization, result
+        in integration_results.items()
+    }
+
+
+def flux_correct_scan(
+    scan_record,
+    integration_result,
+):
+    """Correct integrated intensity using Au mesh current."""
+    clean = integration_result["clean"]
+    monitor = scan_record["au_mesh_current"]
+    monitor_values = np.asarray(
+        monitor.values,
+        dtype=float,
+    ).reshape(-1)
+    energies = np.asarray(
+        clean.energy.values,
+        dtype=float,
+    )
+
+    if len(monitor_values) != len(energies):
+        raise ValueError(
+            f"Scan {scan_record['scan_id']} has "
+            f"{len(monitor_values)} monitor values for "
+            f"{len(energies)} energies"
+        )
+    if not np.all(np.isfinite(monitor_values)):
+        raise ValueError(
+            f"Scan {scan_record['scan_id']} has "
+            f"non-finite Au mesh current"
+        )
+    if np.any(monitor_values == 0):
+        raise ValueError(
+            f"Scan {scan_record['scan_id']} has zero "
+            f"Au mesh current"
+        )
+
+    if "energy" in monitor.coords:
+        monitor_energies = np.asarray(
+            monitor["energy"].values,
+            dtype=float,
+        ).reshape(-1)
+
+        if not np.allclose(
+            monitor_energies,
+            energies,
+        ):
+            raise ValueError(
+                f"Scan {scan_record['scan_id']} Au mesh "
+                f"energies do not match integrated energies"
+            )
+
+    flux = xr.DataArray(
+        monitor_values,
+        coords={"energy": energies},
+        dims=("energy",),
+        name="au_mesh_current",
+    )
+    flux_corrected = clean / flux
+    flux_corrected.name = "flux_corrected_intensity"
+
+    return {
+        "flux": flux,
+        "flux_corrected": flux_corrected,
+    }
+
+
+def flux_correct_scan_set(
+    scans,
+    integration_results,
+    processing,
+):
+    """Optionally flux-correct every polarization."""
+    settings = processing.get(
+        "flux_correction",
+        {},
+    )
+
+    if not settings.get("enabled", False):
+        return {}
+
+    return {
+        polarization: flux_correct_scan(
+            scan_record=scans[polarization],
+            integration_result=result,
         )
         for polarization, result
         in integration_results.items()
