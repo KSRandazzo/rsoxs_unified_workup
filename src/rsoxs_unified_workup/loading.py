@@ -1,3 +1,6 @@
+import xarray as xr
+
+
 def _compact_number(value):
     """Format a number without unnecessary trailing zeros."""
     return f"{float(value):g}"
@@ -33,3 +36,62 @@ def scan_ids_by_polarization(scan_set_data):
         scan_ids[polarization] = int(scan["scan_id"])
 
     return scan_ids
+
+
+def load_scans(loader, scan_set_data):
+    """Load every scan in a configured scan set."""
+    sample = scan_set_data["sample"]
+    scan_set = scan_set_data["scan_set"]
+    base_description = build_base_description(sample)
+    loaded_scans = {}
+
+    for scan_record in scan_set_data["scans"]:
+        scan_id = int(scan_record["scan_id"])
+        polarization = float(scan_record["polarization_deg"])
+
+        if polarization.is_integer():
+            polarization = int(polarization)
+
+        data = loader.loadRun(scan_id)
+        measured_polarization = data.attrs.get("polarization")
+
+        if measured_polarization is None:
+            raise ValueError(
+                f"Scan {scan_id} has no polarization metadata"
+            )
+
+        if abs(float(measured_polarization) - float(polarization)) > 1e-6:
+            raise ValueError(
+                f"Scan {scan_id} was configured as {polarization}°, "
+                f"but its data reports {measured_polarization}°"
+            )
+
+        energy_dimension = data.energy.dims[0]
+
+        loaded_scans[polarization] = {
+            **sample,
+            **scan_set,
+            "scan_id": scan_id,
+            "polarization_deg": polarization,
+            "base_description": base_description,
+            "description": (
+                f"{base_description}, polarization={polarization}°"
+            ),
+            "data": data,
+            "sdd": data.attrs["sdd"],
+            "pixel_size": data.attrs["pixel1"],
+            "au_mesh_current": xr.DataArray(
+                data.attrs["RSoXS Au Mesh Current"],
+                dims=[energy_dimension],
+                coords={
+                    "energy": (
+                        energy_dimension,
+                        data.energy.values,
+                    )
+                },
+            ),
+            "ring_current": data.attrs["NSLS-II Ring Current"],
+            "date_time": data.attrs["meas_time"],
+        }
+
+    return loaded_scans
