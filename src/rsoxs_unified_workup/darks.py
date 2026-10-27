@@ -41,3 +41,40 @@ def load_dark_frames(loader, scans):
         )
 
     return scans
+
+
+def build_dark_masks(scans, cutoffs):
+    """Build one hot-pixel mask per polarization."""
+    masks = {}
+    summaries = {}
+
+    for polarization, scan_data in scans.items():
+        if polarization not in cutoffs:
+            raise ValueError(
+                f"No dark cutoff supplied for "
+                f"polarization {polarization}°"
+            )
+
+        darks = scan_data["darks"]
+        cutoff = float(cutoffs[polarization])
+
+        maximum_by_pixel = darks.max(
+            dim="time",
+            skipna=True,
+        )
+        mask = maximum_by_pixel > cutoff
+
+        masked_pixels = int(mask.sum().item())
+        total_pixels = int(mask.size)
+
+        masks[polarization] = mask
+        summaries[polarization] = {
+            "scan_id": scan_data["scan_id"],
+            "cutoff": cutoff,
+            "masked_pixels": masked_pixels,
+            "masked_percent": (
+                100 * masked_pixels / total_pixels
+            ),
+        }
+
+    return masks, summaries

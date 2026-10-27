@@ -132,3 +132,57 @@ def plot_dark_histograms(
         plt.close(fig)
 
     return cutoffs
+
+
+def plot_dark_masks(scans, dark_masks):
+    """Plot the spatial locations of masked dark pixels."""
+    polarization_count = len(scans)
+    column_count = 2
+    row_count = int(np.ceil(polarization_count / column_count))
+
+    fig, axes = plt.subplots(
+        row_count,
+        column_count,
+        figsize=(12, 6 * row_count),
+        constrained_layout=True,
+    )
+    axes = np.atleast_1d(axes).flatten()
+
+    for axis, (polarization, scan_data) in zip(
+        axes,
+        scans.items(),
+    ):
+        mask = dark_masks[polarization]
+        y_positions, x_positions = np.where(mask.values)
+
+        axis.scatter(
+            x_positions,
+            y_positions,
+            s=3,
+            color="cyan",
+        )
+        axis.set_xlim(0, mask.sizes["pix_x"])
+        axis.set_ylim(0, mask.sizes["pix_y"])
+        axis.set_aspect("equal")
+        axis.set_title(
+            f"{scan_data['sample_name']}: "
+            f"Scan {scan_data['scan_id']}, "
+            f"polarization={polarization}°\n"
+            f"{len(x_positions):,} masked pixels"
+        )
+        axis.set_xlabel("Pixel x")
+        axis.set_ylabel("Pixel y")
+
+    for unused_axis in axes[polarization_count:]:
+        unused_axis.remove()
+
+    first_scan = next(iter(scans.values()))
+    fig.suptitle(
+        f"Dark-derived hot-pixel masks\n"
+        f"{first_scan['sample_name']}: "
+        f"{first_scan['base_description']}",
+        fontsize=16,
+    )
+
+    plt.show()
+    plt.close(fig)
