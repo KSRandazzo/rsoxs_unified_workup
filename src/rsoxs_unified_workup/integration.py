@@ -342,3 +342,142 @@ def integrate_scan_set(
         )
 
     return results
+
+
+def integrate_dark_scan(
+    scan_record,
+    final_mask,
+    shared_center,
+    integration_result,
+):
+    """Integrate the first dark frame at every scan energy."""
+    darks = scan_record["darks"]
+
+    if "time" in darks.dims:
+        dark_frame = darks.isel(time=0)
+        dark_frame_index = 0
+    else:
+        dark_frame = darks
+        dark_frame_index = None
+
+    dark_frame = dark_frame.transpose(
+        "pix_y",
+        "pix_x",
+    )
+    loaded_data, loaded_masks = (
+        prepare_integration_inputs(
+            scan_record,
+            final_mask,
+        )
+    )
+    integrator = build_energy_series_integrator(
+        loaded_data=loaded_data,
+        initial_mask=loaded_masks.isel(energy=0),
+        shared_center=shared_center,
+    )
+
+    remeshed_frames = []
+    clean_frames = []
+
+    for energy_index, energy in enumerate(
+        loaded_data.energy.values
+    ):
+        energy = float(energy)
+        print(
+            f"Scan {scan_record['scan_id']}: "
+            f"integrating dark time=0 at {energy:g} eV"
+        )
+
+        mask = loaded_masks.isel(
+            energy=energy_index
+        ).transpose("pix_y", "pix_x")
+        integrator.mask = np.asarray(
+            mask.values,
+            dtype=bool,
+        )
+
+        dark_image = dark_frame.assign_coords(
+            energy=energy
+        )
+        dark_image.attrs = loaded_data.attrs
+
+        remeshed = integrate_single_frame(
+            integrator,
+            dark_image,
+            energy,
+        )
+        postmask = integration_result[
+            "postmask"
+        ].isel(
+            energy=slice(
+                energy_index,
+                energy_index + 1,
+            )
+        )
+        clean = apply_positional_mask(
+            remeshed,
+            postmask,
+        )
+
+        remeshed_frames.append(remeshed)
+        clean_frames.append(clean)
+
+    darks_remeshed = xr.concat(
+        remeshed_frames,
+        dim="energy",
+        join="outer",
+    )
+    darks_clean = xr.concat(
+        clean_frames,
+        dim="energy",
+        join="outer",
+    )
+
+    return {
+        "dark_frame_index": dark_frame_index,
+        "original_dark": dark_frame,
+        "darks_remeshed": darks_remeshed,
+        "darks_remeshed_mask": integration_result[
+            "remeshed_mask"
+        ],
+        "darks_remeshed_ones": integration_result[
+            "remeshed_ones"
+        ],
+        "darks_clean": darks_clean,
+    }
+
+
+def integrate_dark_scan_set(
+    scans,
+    final_masks,
+    integration_results,
+    processing,
+):
+    """Integrate the first dark frame for every polarization."""
+    shared_center = get_shared_beam_center(processing)
+    dark_results = {}
+
+    for polarization, scan_record in scans.items():
+        if polarization not in final_masks:
+            raise ValueError(
+                f"No final mask for polarization "
+                f"{polarization}°"
+            )
+        if polarization not in integration_results:
+            raise ValueError(
+                f"No final integration result for "
+                f"polarization {polarization}°"
+            )
+
+        dark_results[polarization] = (
+            integrate_dark_scan(
+                scan_record=scan_record,
+                final_mask=final_masks[polarization],
+                shared_center=shared_center,
+                integration_result=(
+                    integration_results[polarization]
+                ),
+            )
+        )
+
+    return dark_results

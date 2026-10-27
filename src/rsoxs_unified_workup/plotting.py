@@ -843,3 +843,118 @@ def plot_integration_review(scan_record, result):
 
             plt.show()
             plt.close(fig)
+
+
+def plot_dark_integration_review(
+    scan_record,
+    result,
+    upper_percentile,
+):
+    """Compare the selected raw dark with its integrated result."""
+    original_dark = result["original_dark"]
+    vmin = float(np.nanmin(original_dark.values))
+    vmax = float(
+        np.nanpercentile(
+            original_dark.values,
+            upper_percentile,
+        )
+    )
+    sample_points = [
+        (0.02, -50, "red"),
+        (0.005, 170, "cyan"),
+        (0.08, -90, "lawngreen"),
+        (0.12, -90, "goldenrod"),
+    ]
+
+    for energy_index, energy in enumerate(
+        result["darks_clean"].energy.values
+    ):
+        integrated_dark = result[
+            "darks_clean"
+        ].isel(energy=energy_index)
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                1,
+                2,
+                figsize=(14, 6),
+                constrained_layout=True,
+            )
+
+            original_image = axes[0].pcolormesh(
+                original_dark["pix_x"],
+                original_dark["pix_y"],
+                original_dark,
+                shading="auto",
+                vmin=vmin,
+                vmax=vmax,
+            )
+            axes[0].set_title(
+                f"Original dark, time="
+                f"{result['dark_frame_index']}"
+            )
+            axes[0].set_xlabel("Pixel x")
+            axes[0].set_ylabel("Pixel y")
+            axes[0].set_aspect("equal")
+            fig.colorbar(
+                original_image,
+                ax=axes[0],
+                shrink=0.7,
+                label="Dark counts",
+            )
+
+            integrated_image = axes[1].pcolormesh(
+                integrated_dark["q"],
+                integrated_dark["chi"],
+                integrated_dark,
+                shading="auto",
+            )
+            axes[1].set_title(
+                "Integrated dark with postmask"
+            )
+            axes[1].set_xlabel("q (Å⁻¹)")
+            axes[1].set_ylabel("chi (degrees)")
+            fig.colorbar(
+                integrated_image,
+                ax=axes[1],
+                shrink=0.7,
+                label="Dark counts",
+            )
+
+            for q_value, chi_value, color in sample_points:
+                sampled_intensity = integrated_dark.sel(
+                    q=q_value,
+                    chi=chi_value,
+                    method="nearest",
+                ).item()
+                axes[1].plot(
+                    q_value,
+                    chi_value,
+                    marker="o",
+                    color=color,
+                    linestyle="none",
+                    markersize=7,
+                    label=(
+                        f"q={q_value:g}, "
+                        f"χ={chi_value:g}: "
+                        f"{sampled_intensity:.2f}"
+                    ),
+                )
+
+            axes[1].legend(
+                loc="upper right",
+                fontsize=7,
+            )
+            fig.suptitle(
+                f"Dark integration for Scan "
+                f"{scan_record['scan_id']}, "
+                f"polarization="
+                f"{scan_record['polarization_deg']}°\n"
+                f"{scan_record['sample_name']}: "
+                f"{scan_record['base_description']}\n"
+                f"Energy={float(energy):g} eV",
+                fontsize=15,
+            )
+
+            plt.show()
+            plt.close(fig)
