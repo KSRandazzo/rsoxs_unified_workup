@@ -1,5 +1,6 @@
 import numpy as np
 from skimage.draw import polygon2mask
+import xarray as xr
 
 
 def rotated_rectangle(
@@ -155,3 +156,242 @@ def combine_static_masks(
         )
 
     return static_masks
+
+
+def apply_static_masks(scans, static_masks):
+    """Apply static masks and store masked data as NaN."""
+    for polarization, scan_data in scans.items():
+        if polarization not in static_masks:
+            raise ValueError(
+                f"No static mask for polarization "
+                f"{polarization}°"
+            )
+
+        static_mask = static_masks[polarization]
+
+        scan_data["static_mask"] = static_mask
+        scan_data["masked_data_static"] = (
+            scan_data["data"].where(~static_mask)
+        )
+
+    return scans
+
+
+def build_saturation_masks(scans):
+    """Union negative saturated pixels across polarizations."""
+    first_scan = next(iter(scans.values()))
+    reference = first_scan["masked_data_static"]
+    reference_energies = reference.energy.values
+
+    combined = xr.zeros_like(reference, dtype=bool)
+
+    for polarization, scan_data in scans.items():
+        masked_data = scan_data["masked_data_static"]
+
+        if not np.array_equal(
+            masked_data.energy.values,
+            reference_energies,
+        ):
+            raise ValueError(
+                f"Energy values for polarization "
+                f"{polarization}° do not match the scan set"
+            )
+
+        saturated = (masked_data < 0).fillna(False)
+        combined = combined | saturated
+
+    combined.name = "saturation_mask"
+
+    return combined
+
+
+def build_center_masks(
+    saturation_masks,
+    beamstop_vertices,
+    settings,
+):
+    """Build circular center masks for every energy."""
+    center_x = float(settings["beam_center_x_guess"])
+    center_y = float(settings["beam_center_y_guess"])
+    search_width = float(
+        settings["saturation_search_width"]
+    )
+
+    energy_dimension = saturation_masks.energy.dims[0]
+    detector_height = saturation_masks.sizes["pix_y"]
+    detector_width = saturation_masks.sizes["pix_x"]
+
+    half_width = search_width / 2
+    x_min = max(0, int(center_x - half_width))
+    x_max = min(
+        detector_width,
+        int(center_x + half_width),
+    )
+    y_min = max(0, int(center_y - half_width))
+    y_max = min(
+        detector_height,
+        int(center_y + half_width),
+    )
+
+    visible_vertices = np.array(
+        [
+            (x, y)
+            for x, y in beamstop_vertices
+            if x >= 0 and y >= 0
+        ]
+    )
+
+    if visible_vertices.size == 0:
+        raise ValueError(
+            "No nonnegative beamstop vertices are available"
+        )
+
+    beamstop_distances = np.sqrt(
+        (visible_vertices[:, 0] - center_x) ** 2
+        + (visible_vertices[:, 1] - center_y) ** 2
+    )
+    farthest_beamstop_index = int(
+        np.argmax(beamstop_distances)
+    )
+    farthest_beamstop = visible_vertices[
+        farthest_beamstop_index
+    ]
+    beamstop_radius = float(
+        beamstop_distances[farthest_beamstop_index]
+    )
+
+    y_grid, x_grid = np.indices(
+        (detector_height, detector_width)
+    )
+    distance_grid = np.sqrt(
+        (x_grid - center_x) ** 2
+        + (y_grid - center_y) ** 2
+    )
+
+    center_mask_values = np.zeros(
+        saturation_masks.shape,
+        dtype=bool,
+    )
+    energy_axis = saturation_masks.get_axis_num(
+        energy_dimension
+    )
+    summaries = []
+
+    for index in range(
+        saturation_masks.sizes[energy_dimension]
+    ):
+        saturation = saturation_masks.isel(
+            {energy_dimension: index}
+        )
+        cropped = saturation.values[
+            y_min:y_max,
+            x_min:x_max,
+        ]
+        cropped_y, cropped_x = np.where(cropped)
+
+        selected_radius = beamstop_radius
+        selected_point = farthest_beamstop
+        radius_source = "beamstop"
+
+        if len(cropped_x):
+            full_x = cropped_x + x_min
+            full_y = cropped_y + y_min
+            saturated_points = np.column_stack(
+                [full_x, full_y]
+            )
+            saturated_distances = np.sqrt(
+                (saturated_points[:, 0] - center_x) ** 2
+                + (saturated_points[:, 1] - center_y) ** 2
+            )
+            farthest_saturated_index = int(
+                np.argmax(saturated_distances)
+            )
+            saturation_radius = float(
+                saturated_distances[
+                    farthest_saturated_index
+                ]
+            )
+
+            if saturation_radius >= beamstop_radius:
+                selected_radius = saturation_radius
+                selected_point = saturated_points[
+                    farthest_saturated_index
+                ]
+                radius_source = "saturation"
+
+        center_mask = distance_grid < selected_radius
+        indexer = [slice(None)] * saturation_masks.ndim
+        indexer[energy_axis] = index
+        center_mask_values[tuple(indexer)] = center_mask
+
+        summaries.append(
+            {
+                "energy": float(
+                    saturation_masks.energy.values[index]
+                ),
+                "radius": selected_radius,
+                "radius_source": radius_source,
+                "farthest_x": float(selected_point[0]),
+                "farthest_y": float(selected_point[1]),
+                "search_bounds": (
+                    x_min,
+                    x_max,
+                    y_min,
+                    y_max,
+                ),
+            }
+        )
+
+    center_masks = saturation_masks.copy(
+        data=center_mask_values
+    )
+    center_masks.name = "center_mask"
+
+    return center_masks, summaries
+
+
+def build_final_masks(
+    static_masks,
+    saturation_masks,
+    center_masks,
+):
+    """Combine all mask stages for every polarization."""
+    if saturation_masks.shape != center_masks.shape:
+        raise ValueError(
+            "Saturation and center masks have different shapes"
+        )
+
+    final_masks = {}
+
+    for polarization, static_mask in static_masks.items():
+        final_mask = (
+            static_mask
+            | saturation_masks
+            | center_masks
+        )
+        final_mask = final_mask.transpose(
+            *saturation_masks.dims
+        )
+        final_mask.name = "final_mask"
+        final_masks[polarization] = final_mask
+
+    return final_masks
+
+
+def apply_final_masks(scans, final_masks):
+    """Apply final masks and attach results to each scan."""
+    for polarization, scan_data in scans.items():
+        if polarization not in final_masks:
+            raise ValueError(
+                f"No final mask for polarization "
+                f"{polarization}°"
+            )
+
+        final_mask = final_masks[polarization]
+
+        scan_data["final_mask"] = final_mask
+        scan_data["masked_data_final"] = (
+            scan_data["data"].where(~final_mask)
+        )
+
+    return scans
