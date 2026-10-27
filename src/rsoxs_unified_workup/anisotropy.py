@@ -345,3 +345,107 @@ def aggregate_anisotropy(anisotropy_results):
         for mode, sector_results
         in anisotropy_results.items()
     }
+
+
+def build_pointwise_anisotropy_maps(
+    anisotropy_results,
+):
+    """Build stitched chi-resolved maps for each scan pair."""
+    all_results = {}
+
+    for mode, sector_results in (
+        anisotropy_results.items()
+    ):
+        sectors_by_pair = {}
+
+        for sector in sector_results.values():
+            pair_id = sector["pair_id"]
+            sectors_by_pair.setdefault(
+                pair_id,
+                [],
+            ).append(sector)
+
+        mode_results = {}
+
+        for pair_id, sectors in sectors_by_pair.items():
+            sectors = sorted(
+                sectors,
+                key=lambda sector: float(
+                    sector["chi_center_deg"]
+                ),
+            )
+
+            parallel_patches = [
+                sector["parallel_slice"].transpose(
+                    "energy",
+                    "chi",
+                    "q",
+                )
+                for sector in sectors
+            ]
+            perpendicular_patches = [
+                sector["perpendicular_slice"].transpose(
+                    "energy",
+                    "chi",
+                    "q",
+                )
+                for sector in sectors
+            ]
+
+            parallel = xr.concat(
+                parallel_patches,
+                dim="chi",
+            ).sortby("chi")
+            perpendicular = xr.concat(
+                perpendicular_patches,
+                dim="chi",
+            ).sortby("chi")
+
+            if not np.array_equal(
+                parallel["chi"].values,
+                perpendicular["chi"].values,
+            ):
+                raise ValueError(
+                    f"Parallel and perpendicular chi "
+                    f"coordinates differ for pair {pair_id!r}"
+                )
+
+            chi_values = parallel["chi"].values
+            unique_chi = np.unique(chi_values)
+
+            if len(unique_chi) != len(chi_values):
+                raise ValueError(
+                    f"Overlapping sectors produced duplicate "
+                    f"chi coordinates for pair {pair_id!r}"
+                )
+
+            difference = parallel - perpendicular
+            denominator = parallel + perpendicular
+            pointwise_anisotropy = (
+                difference
+                / denominator.where(denominator != 0)
+            )
+
+            parallel.name = "parallel_intensity"
+            perpendicular.name = (
+                "perpendicular_intensity"
+            )
+            difference.name = "intensity_difference"
+            pointwise_anisotropy.name = (
+                "pointwise_anisotropy"
+            )
+
+            mode_results[pair_id] = {
+                "parallel": parallel,
+                "perpendicular": perpendicular,
+                "difference": difference,
+                "anisotropy": pointwise_anisotropy,
+                "sector_ids": [
+                    sector["sector_id"]
+                    for sector in sectors
+                ],
+            }
+
+        all_results[mode] = mode_results
+
+    return all_results

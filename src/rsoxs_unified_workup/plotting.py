@@ -1509,3 +1509,128 @@ def plot_aggregate_anisotropy_comparison(
 
             plt.show()
             plt.close(fig)
+
+
+def plot_pointwise_anisotropy_review(
+    scans,
+    pointwise_results,
+    anisotropy_limit=0.15,
+    difference_limit=0.15,
+):
+    """Review stitched pointwise anisotropy maps."""
+    first_scan = next(iter(scans.values()))
+
+    for mode, pair_results in pointwise_results.items():
+        for pair_id, result in pair_results.items():
+            energies = result["anisotropy"].energy.values
+
+            for energy_index, energy in enumerate(energies):
+                parallel = result["parallel"].isel(
+                    energy=energy_index
+                )
+                perpendicular = result[
+                    "perpendicular"
+                ].isel(energy=energy_index)
+                difference = result["difference"].isel(
+                    energy=energy_index
+                )
+                anisotropy = result["anisotropy"].isel(
+                    energy=energy_index
+                )
+
+                intensity_values = np.concatenate([
+                    parallel.values.ravel(),
+                    perpendicular.values.ravel(),
+                ])
+                intensity_values = intensity_values[
+                    np.isfinite(intensity_values)
+                ]
+                intensity_min, intensity_max = (
+                    np.nanpercentile(
+                        intensity_values,
+                        [5, 95],
+                    )
+                )
+
+                with plt.style.context("dark_background"):
+                    fig, axes = plt.subplots(
+                        1,
+                        4,
+                        figsize=(24, 6),
+                        constrained_layout=True,
+                    )
+
+                    panels = [
+                        (
+                            parallel,
+                            "Stitched parallel intensity",
+                            "viridis",
+                            intensity_min,
+                            intensity_max,
+                            "Normalized intensity",
+                        ),
+                        (
+                            perpendicular,
+                            "Stitched perpendicular intensity",
+                            "viridis",
+                            intensity_min,
+                            intensity_max,
+                            "Normalized intensity",
+                        ),
+                        (
+                            difference,
+                            "Parallel − perpendicular",
+                            "coolwarm",
+                            -difference_limit,
+                            difference_limit,
+                            "Intensity difference",
+                        ),
+                        (
+                            anisotropy,
+                            "Pointwise anisotropy",
+                            "coolwarm",
+                            -anisotropy_limit,
+                            anisotropy_limit,
+                            "Anisotropy",
+                        ),
+                    ]
+
+                    for axis, (
+                        data,
+                        title,
+                        cmap,
+                        vmin,
+                        vmax,
+                        colorbar_label,
+                    ) in zip(axes, panels):
+                        image = axis.pcolormesh(
+                            data["q"],
+                            data["chi"],
+                            data,
+                            shading="auto",
+                            cmap=cmap,
+                            vmin=vmin,
+                            vmax=vmax,
+                        )
+                        axis.set_title(title)
+                        axis.set_xlabel("q (Å⁻¹)")
+                        axis.set_ylabel("chi (degrees)")
+                        fig.colorbar(
+                            image,
+                            ax=axis,
+                            shrink=0.8,
+                            label=colorbar_label,
+                        )
+
+                    fig.suptitle(
+                        f"Pointwise anisotropy review\n"
+                        f"{pair_id}; "
+                        f"{mode.replace('_', ' ')}; "
+                        f"Energy={float(energy):g} eV\n"
+                        f"{first_scan['sample_name']}: "
+                        f"{first_scan['base_description']}",
+                        fontsize=15,
+                    )
+
+                    plt.show()
+                    plt.close(fig)
