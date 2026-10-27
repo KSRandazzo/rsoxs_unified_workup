@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import tomllib
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +30,26 @@ def read_config_tables(config_dir=None):
         tables[table_name] = pd.read_csv(path)
 
     return tables
+
+
+def read_processing_config(scan_set_id, config_dir=None):
+    """Read processing settings for one scan set."""
+    if config_dir is None:
+        config_dir = DEFAULT_CONFIG_DIR
+
+    path = (
+        Path(config_dir)
+        / "processing"
+        / f"{scan_set_id}.toml"
+    )
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Missing processing configuration file: {path}"
+        )
+
+    with path.open("rb") as file:
+        return tomllib.load(file)
 
 
 def _single_record(rows, description):
@@ -75,4 +96,8 @@ def load_scan_set(scan_set_id, config_dir=None):
         "scan_set": scan_set,
         "scans": scans.to_dict(orient="records"),
         "polarization_pairs": pairs.to_dict(orient="records"),
+        "processing": read_processing_config(
+            scan_set_id,
+            config_dir,
+        ),
     }
