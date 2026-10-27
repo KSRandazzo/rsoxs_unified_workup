@@ -2,6 +2,8 @@ from pathlib import Path
 
 import pandas as pd
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_DIR = PROJECT_ROOT / "config"
 
 TABLE_FILES = {
     "samples": "samples.csv",
@@ -11,8 +13,10 @@ TABLE_FILES = {
 }
 
 
-def read_config_tables(config_dir="config"):
+def read_config_tables(config_dir=None):
     """Read all configuration CSV files."""
+    if config_dir is None:
+        config_dir = DEFAULT_CONFIG_DIR
     config_dir = Path(config_dir)
     tables = {}
 
@@ -37,7 +41,7 @@ def _single_record(rows, description):
     return rows.iloc[0].to_dict()
 
 
-def load_scan_set(scan_set_id, config_dir="config"):
+def load_scan_set(scan_set_id, config_dir=None):
     """Load a scan set and its linked sample, scans, and pairs."""
     tables = read_config_tables(config_dir)
 
