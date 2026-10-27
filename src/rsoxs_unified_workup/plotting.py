@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LogNorm
 from matplotlib.patches import Circle
+import matplotlib.ticker as mticker
 
 
 def plot_raw_frames(
@@ -538,3 +539,175 @@ def plot_final_masked_frames(
 
     plt.show()
     plt.close(fig)
+
+
+def plot_beam_center_fit(fit_result, scan_record):
+    """Review the fitted center, q peaks, and search grids."""
+    fine_center = fit_result["fine_best"]
+    coarse_center = fit_result["coarse_best"]
+    remeshed = fit_result["selected_remesh"]
+    detector_frame = fit_result["selected_data"].isel(
+        energy=0
+    )
+    coarse_grid = fit_result["coarse_grid"]
+    fine_grid = fit_result["fine_grid"]
+
+    with plt.style.context("dark_background"):
+        fig, axes = plt.subplots(
+            2,
+            3,
+            figsize=(18, 10),
+            constrained_layout=True,
+        )
+
+        remesh_image = axes[0, 0].pcolormesh(
+            remeshed["q"],
+            remeshed["chi"],
+            remeshed,
+            shading="auto",
+        )
+        axes[0, 0].set_title("Integrated data after postmask")
+        axes[0, 0].set_xlabel("q")
+        axes[0, 0].set_ylabel("chi")
+        fig.colorbar(
+            remesh_image,
+            ax=axes[0, 0],
+            shrink=0.7,
+            label="Intensity",
+        )
+
+        for center, curve in fit_result[
+            "intensity_curves"
+        ].items():
+            axes[0, 1].plot(
+                curve["q"],
+                curve["intensity"],
+                label=f"{center}°",
+            )
+        axes[0, 1].set_yscale("log")
+        axes[0, 1].set_title("Azimuthal-region intensity curves")
+        axes[0, 1].set_xlabel("q")
+        axes[0, 1].set_ylabel("Intensity")
+        axes[0, 1].legend()
+
+        for center, curve in fit_result[
+            "fit_curves"
+        ].items():
+            axes[0, 2].scatter(
+                curve["q_fit"],
+                curve["intensity_fit"],
+                s=10,
+                label=f"{center}° data",
+            )
+            if curve["q_smooth"] is not None:
+                axes[0, 2].plot(
+                    curve["q_smooth"],
+                    curve["intensity_smooth"],
+                    label=f"{center}° fit",
+                )
+        axes[0, 2].set_title("Gaussian peak fits")
+        axes[0, 2].set_xlabel("q")
+        axes[0, 2].set_ylabel("Intensity")
+        axes[0, 2].legend(fontsize=8)
+
+        axes[1, 0].imshow(
+            detector_frame,
+            norm=LogNorm(vmin=1, vmax=1e5),
+            origin="lower",
+            cmap="jet",
+        )
+        axes[1, 0].scatter(
+            fine_center["x"],
+            fine_center["y"],
+            color="deeppink",
+            s=40,
+        )
+        for radius in (5, 50, 150):
+            axes[1, 0].add_patch(
+                Circle(
+                    (fine_center["x"], fine_center["y"]),
+                    radius,
+                    fill=False,
+                    edgecolor="deeppink",
+                )
+            )
+        axes[1, 0].set_title("Fitted center on detector")
+        axes[1, 0].set_xlabel("Pixel x")
+        axes[1, 0].set_ylabel("Pixel y")
+        axes[1, 0].set_aspect("equal")
+
+        coarse_image = axes[1, 1].pcolormesh(
+            coarse_grid["x"],
+            coarse_grid["y"],
+            coarse_grid,
+            shading="auto",
+        )
+        axes[1, 1].scatter(
+            coarse_center["x"],
+            coarse_center["y"],
+            marker="x",
+            color="cyan",
+            s=100,
+        )
+        axes[1, 1].set_title("Coarse-search cost")
+        axes[1, 1].set_xlabel("Center x")
+        axes[1, 1].set_ylabel("Center y")
+        axes[1, 1].set_aspect("equal")
+        axes[1, 1].xaxis.set_major_locator(
+            mticker.MaxNLocator(integer=True)
+        )
+        axes[1, 1].yaxis.set_major_locator(
+            mticker.MaxNLocator(integer=True)
+        )
+        fig.colorbar(
+            coarse_image,
+            ax=axes[1, 1],
+            shrink=0.7,
+            label="Peak-variance cost",
+        )
+
+        fine_image = axes[1, 2].pcolormesh(
+            fine_grid["x"],
+            fine_grid["y"],
+            fine_grid,
+            shading="auto",
+        )
+        axes[1, 2].scatter(
+            fine_center["x"],
+            fine_center["y"],
+            marker="x",
+            color="cyan",
+            s=100,
+        )
+        axes[1, 2].set_title("Fine-search cost")
+        axes[1, 2].set_xlabel("Center x")
+        axes[1, 2].set_ylabel("Center y")
+        axes[1, 2].set_aspect("equal")
+        axes[1, 2].xaxis.set_major_locator(
+            mticker.MultipleLocator(0.1)
+        )
+        axes[1, 2].yaxis.set_major_locator(
+            mticker.MultipleLocator(0.1)
+        )
+        fig.colorbar(
+            fine_image,
+            ax=axes[1, 2],
+            shrink=0.7,
+            label="Peak-variance cost",
+        )
+
+        fig.suptitle(
+            f"Beam-center fit for Scan "
+            f"{scan_record['scan_id']}, "
+            f"polarization="
+            f"{fit_result['polarization_deg']}°\n"
+            f"{scan_record['sample_name']}: "
+            f"{scan_record['base_description']}\n"
+            f"Fine center=({fine_center['x']}, "
+            f"{fine_center['y']}); "
+            f"energy={fit_result['actual_fit_energy']:g} eV",
+            fontsize=15,
+        )
+
+        plt.show()
+        plt.close(fig)
