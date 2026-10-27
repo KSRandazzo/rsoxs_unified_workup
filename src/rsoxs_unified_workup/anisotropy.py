@@ -1,4 +1,5 @@
 import numpy as np
+import xarray as xr
 
 from rsoxs_unified_workup.normalization import (
     select_chi_region,
@@ -138,6 +139,8 @@ def calculate_sector_anisotropy(
         "perpendicular_polarization": (
             perpendicular_polarization
         ),
+        "parallel_slice": parallel_slice,
+        "perpendicular_slice": perpendicular_slice,
         "parallel_intensity": parallel_intensity,
         "perpendicular_intensity": (
             perpendicular_intensity
@@ -206,3 +209,139 @@ def calculate_anisotropy(
             }
 
     return results
+
+
+def _relative_chi_slice(data, center_degrees):
+    """Express a sector's chi coordinates relative to its center."""
+    relative_chi = (
+        (
+            data["chi"].values
+            - float(center_degrees)
+            + 180
+        )
+        % 360
+    ) - 180
+
+    return (
+        data.assign_coords(chi=relative_chi)
+        .sortby("chi")
+        .rename({"chi": "relative_chi"})
+    )
+
+
+def aggregate_one_mode(sector_results):
+    """Calculate all three aggregate anisotropy methods."""
+    if not sector_results:
+        raise ValueError("No sector results were supplied")
+
+    sector_ids = list(sector_results)
+    reference = sector_results[sector_ids[0]]
+
+    reference_chi = _relative_chi_slice(
+        reference["parallel_slice"],
+        reference["chi_center_deg"],
+    )["relative_chi"]
+
+    parallel_slices = []
+    perpendicular_slices = []
+    sector_anisotropies = []
+
+    for sector_id in sector_ids:
+        sector = sector_results[sector_id]
+
+        parallel = _relative_chi_slice(
+            sector["parallel_slice"],
+            sector["chi_center_deg"],
+        ).interp(relative_chi=reference_chi)
+
+        perpendicular = _relative_chi_slice(
+            sector["perpendicular_slice"],
+            sector["chi_center_deg"],
+        ).interp(relative_chi=reference_chi)
+
+        parallel_slices.append(parallel)
+        perpendicular_slices.append(perpendicular)
+        sector_anisotropies.append(
+            sector["anisotropy"]
+        )
+
+    sector_coordinate = xr.IndexVariable(
+        "sector",
+        sector_ids,
+    )
+    parallel_stack = xr.concat(
+        parallel_slices,
+        dim=sector_coordinate,
+    )
+    perpendicular_stack = xr.concat(
+        perpendicular_slices,
+        dim=sector_coordinate,
+    )
+    anisotropy_stack = xr.concat(
+        sector_anisotropies,
+        dim=sector_coordinate,
+    )
+
+    pooled_parallel = parallel_stack.mean(
+        "sector",
+        skipna=True,
+    ).mean(
+        "relative_chi",
+        skipna=True,
+    )
+    pooled_perpendicular = perpendicular_stack.mean(
+        "sector",
+        skipna=True,
+    ).mean(
+        "relative_chi",
+        skipna=True,
+    )
+    pooled_denominator = (
+        pooled_parallel + pooled_perpendicular
+    )
+    method_1 = (
+        pooled_parallel - pooled_perpendicular
+    ) / pooled_denominator.where(
+        pooled_denominator != 0
+    )
+
+    pointwise_denominator = (
+        parallel_stack + perpendicular_stack
+    )
+    pointwise_anisotropy = (
+        parallel_stack - perpendicular_stack
+    ) / pointwise_denominator.where(
+        pointwise_denominator != 0
+    )
+    method_2 = pointwise_anisotropy.mean(
+        ("sector", "relative_chi"),
+        skipna=True,
+    )
+
+    method_3 = anisotropy_stack.mean(
+        "sector",
+        skipna=True,
+    )
+
+    method_1.name = "anisotropy_method_1"
+    method_2.name = "anisotropy_method_2"
+    method_3.name = "anisotropy_method_3"
+
+    return {
+        "method_1_global_intensity_ratio": method_1,
+        "method_2_pointwise_anisotropy": method_2,
+        "method_3_sector_anisotropy_mean": method_3,
+        "parallel_stack": parallel_stack,
+        "perpendicular_stack": perpendicular_stack,
+        "pointwise_anisotropy": pointwise_anisotropy,
+        "sector_anisotropy_stack": anisotropy_stack,
+    }
+
+
+def aggregate_anisotropy(anisotropy_results):
+    """Calculate all aggregation methods for every mode."""
+    return {
+        mode: aggregate_one_mode(sector_results)
+        for mode, sector_results
+        in anisotropy_results.items()
+    }

@@ -1396,3 +1396,116 @@ def plot_anisotropy_sector_overlays(
 
             plt.show()
             plt.close(fig)
+
+
+def plot_aggregate_anisotropy_comparison(
+    scans,
+    aggregate_results,
+    anisotropy_limit=0.05,
+    difference_limit=0.0005,
+):
+    """Compare three aggregate anisotropy methods."""
+    method_specs = [
+        (
+            "method_1_global_intensity_ratio",
+            "Method 1: global intensity ratio",
+        ),
+        (
+            "method_2_pointwise_anisotropy",
+            "Method 2: pointwise anisotropy",
+        ),
+        (
+            "method_3_sector_anisotropy_mean",
+            "Method 3: sector anisotropy mean",
+        ),
+    ]
+    first_scan = next(iter(scans.values()))
+
+    for mode, results in aggregate_results.items():
+        methods = {
+            key: results[key]
+            for key, _ in method_specs
+        }
+        differences = [
+            (
+                methods[method_specs[0][0]]
+                - methods[method_specs[1][0]],
+                "Method 1 − Method 2",
+            ),
+            (
+                methods[method_specs[1][0]]
+                - methods[method_specs[2][0]],
+                "Method 2 − Method 3",
+            ),
+            (
+                methods[method_specs[0][0]]
+                - methods[method_specs[2][0]],
+                "Method 1 − Method 3",
+            ),
+        ]
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                2,
+                3,
+                figsize=(18, 10),
+                constrained_layout=True,
+            )
+
+            for axis, (key, title) in zip(
+                axes[0],
+                method_specs,
+            ):
+                data = methods[key]
+                image = axis.pcolormesh(
+                    data["q"],
+                    data["energy"],
+                    data,
+                    shading="auto",
+                    cmap="coolwarm",
+                    vmin=-anisotropy_limit,
+                    vmax=anisotropy_limit,
+                )
+                axis.set_title(title)
+                axis.set_xlabel("q (Å⁻¹)")
+                axis.set_ylabel("Energy (eV)")
+                fig.colorbar(
+                    image,
+                    ax=axis,
+                    shrink=0.8,
+                    label="Anisotropy",
+                )
+
+            for axis, (data, title) in zip(
+                axes[1],
+                differences,
+            ):
+                image = axis.pcolormesh(
+                    data["q"],
+                    data["energy"],
+                    data,
+                    shading="auto",
+                    cmap="coolwarm",
+                    vmin=-difference_limit,
+                    vmax=difference_limit,
+                )
+                axis.set_title(title)
+                axis.set_xlabel("q (Å⁻¹)")
+                axis.set_ylabel("Energy (eV)")
+                fig.colorbar(
+                    image,
+                    ax=axis,
+                    shrink=0.8,
+                    label="Anisotropy difference",
+                )
+
+            fig.suptitle(
+                f"Aggregate anisotropy comparison: "
+                f"{mode.replace('_', ' ')}\n"
+                f"{first_scan['sample_name']}: "
+                f"{first_scan['base_description']}",
+                fontsize=16,
+            )
+
+            plt.show()
+            plt.close(fig)
