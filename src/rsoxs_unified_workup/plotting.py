@@ -958,3 +958,87 @@ def plot_dark_integration_review(
 
             plt.show()
             plt.close(fig)
+
+
+def plot_normalization_review(
+    scans,
+    normalization_results,
+):
+    """Compare full-ring and half-ring normalization factors."""
+    first_scan = next(iter(scans.values()))
+    first_result = next(
+        iter(normalization_results.values())
+    )
+
+    for energy in first_result[
+        "full_ring_mean"
+    ].energy.values:
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                1,
+                3,
+                figsize=(18, 5),
+                constrained_layout=True,
+            )
+
+            for polarization, result in (
+                normalization_results.items()
+            ):
+                full_mean = result[
+                    "full_ring_mean"
+                ].sel(energy=energy)
+                half_mean = result[
+                    "half_ring_mean"
+                ].sel(energy=energy)
+                label = (
+                    f"{polarization}°; "
+                    f"scan {scans[polarization]['scan_id']}"
+                )
+
+                axes[0].plot(
+                    full_mean["q"],
+                    full_mean,
+                    label=label,
+                )
+                axes[1].plot(
+                    half_mean["q"],
+                    half_mean,
+                    label=label,
+                )
+                axes[2].plot(
+                    full_mean["q"],
+                    half_mean / full_mean,
+                    label=label,
+                )
+
+            axes[0].set_title("Full-ring mean intensity")
+            axes[1].set_title("Half-ring mean intensity")
+            axes[2].set_title(
+                "Half-ring mean / full-ring mean"
+            )
+
+            axes[0].set_yscale("log")
+            axes[1].set_yscale("log")
+
+            for axis in axes:
+                axis.set_xlabel("q (Å⁻¹)")
+                axis.legend(fontsize=8)
+
+            axes[0].set_ylabel("Mean intensity")
+            axes[1].set_ylabel("Mean intensity")
+            axes[2].set_ylabel("Intensity ratio")
+
+            fig.suptitle(
+                f"Normalization review at "
+                f"{float(energy):g} eV\n"
+                f"{first_scan['sample_name']}: "
+                f"{first_scan['base_description']}\n"
+                f"Half ring: center="
+                f"{first_result['half_ring_center_degrees']:g}°, "
+                f"halfwidth="
+                f"{first_result['half_ring_halfwidth_degrees']:g}°",
+                fontsize=15,
+            )
+
+            plt.show()
+            plt.close(fig)
