@@ -711,3 +711,135 @@ def plot_beam_center_fit(fit_result, scan_record):
 
         plt.show()
         plt.close(fig)
+
+
+def plot_integration_review(scan_record, result):
+    """Review each stage of final integration at every energy."""
+    datasets = [
+        ("remeshed", "Integrated data", "Intensity"),
+        (
+            "remeshed_mask",
+            "Integrated eligible-pixel image",
+            "Source-pixel count",
+        ),
+        (
+            "remeshed_ones",
+            "Integrated ones",
+            "Source-pixel count",
+        ),
+        (
+            "source_fraction",
+            "Fraction of eligible source pixels",
+            "Fraction",
+        ),
+        (
+            "clean_uncapped_q",
+            "Postmasked data without q cap",
+            "Intensity",
+        ),
+        (
+            "clean",
+            "Postmasked data with q cap",
+            "Intensity",
+        ),
+    ]
+
+    sample_points = [
+        (0.015, -50, "red"),
+        (0.04, 50, "cyan"),
+        (0.11, -100, "lawngreen"),
+    ]
+
+    for energy_index, energy in enumerate(
+        result["remeshed"].energy.values
+    ):
+        q_cap = float(
+            result["q_cap"].sel(
+                energy=energy,
+                method="nearest",
+            )
+        )
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                2,
+                3,
+                figsize=(16, 10),
+                constrained_layout=True,
+            )
+
+            for axis, (
+                key,
+                title,
+                colorbar_label,
+            ) in zip(axes.flat, datasets):
+                frame = result[key].isel(
+                    energy=energy_index
+                )
+                image = axis.pcolormesh(
+                    frame["q"],
+                    frame["chi"],
+                    frame,
+                    shading="auto",
+                )
+                axis.set_title(title)
+                axis.set_xlabel("q (Å⁻¹)")
+                axis.set_ylabel("chi (degrees)")
+                fig.colorbar(
+                    image,
+                    ax=axis,
+                    shrink=0.7,
+                    label=colorbar_label,
+                )
+                if key == "clean":
+                    axis.axvline(
+                        q_cap,
+                        color="fuchsia",
+                        linestyle="--",
+                        label=f"q cap={q_cap:.4f} Å⁻¹",
+                    )
+
+                for q_value, chi_value, color in sample_points:
+                    sampled_intensity = frame.sel(
+                        q=q_value,
+                        chi=chi_value,
+                        method="nearest",
+                    ).item()
+
+                    axis.plot(
+                        q_value,
+                        chi_value,
+                        marker="o",
+                        color=color,
+                        markersize=7,
+                        linestyle="none",
+                        label=(
+                            f"q={q_value:g}, "
+                            f"χ={chi_value:g}: "
+                            f"{sampled_intensity:.2f}"
+                        ),
+                    )
+
+                axis.legend(
+                    loc="upper right",
+                    fontsize=7,
+                )
+
+            fig.suptitle(
+                f"Final integration for Scan "
+                f"{scan_record['scan_id']}, "
+                f"polarization="
+                f"{scan_record['polarization_deg']}°\n"
+                f"{scan_record['sample_name']}: "
+                f"{scan_record['base_description']}\n"
+                f"Energy={float(energy):g} eV; "
+                f"shared center="
+                f"({result['beam_center_x']}, "
+                f"{result['beam_center_y']}); "
+                f"postmask threshold="
+                f"{result['postmask_threshold']:g}",
+                fontsize=15,
+            )
+
+            plt.show()
+            plt.close(fig)

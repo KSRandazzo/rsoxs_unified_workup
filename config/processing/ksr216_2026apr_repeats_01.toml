@@ -42,3 +42,6 @@ beam_center_jobs = 32
 [shared_beam_center]
 center_x = 473.05
 center_y = 514.7
+
+[integration]
+postmask_threshold = 1.0
