@@ -40,7 +40,7 @@ apply_postmask = true
 beam_center_jobs = 32
 
 [shared_beam_center]
-center_x = 473.05
+center_x = 472.9
 center_y = 514.7
 
 [integration]

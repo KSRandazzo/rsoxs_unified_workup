@@ -4,6 +4,9 @@ import xarray as xr
 from joblib import Parallel, delayed, parallel_backend
 from scipy.optimize import curve_fit
 from tqdm.auto import tqdm
+from copy import deepcopy
+from datetime import datetime, timezone
+from uuid import uuid4
 
 
 def wrap_chi(values):
@@ -548,6 +551,55 @@ def best_grid_point(cost_grid):
     }
 
 
+def _fit_history_entry(
+    result,
+    processing,
+    median_suggestion,
+    pass_id,
+    started_at_utc,
+):
+    """Capture a compact record of one fit and its actual mask."""
+    mask = result["selected_mask"]
+    actual_energy = float(result["actual_fit_energy"])
+
+    if float(mask["energy"].item()) != actual_energy:
+        raise ValueError("Fit data and mask energies do not match")
+
+    settings = mask.attrs.get("center_mask_settings")
+    summaries = mask.attrs.get("center_mask_summaries")
+
+    if settings is None or summaries is None:
+        raise ValueError(
+            "Center-mask metadata is missing. "
+            "Rebuild the center and final masks before fitting."
+        )
+
+    matching = [
+        summary
+        for summary in summaries
+        if float(summary["energy"]) == actual_energy
+    ]
+
+    if len(matching) != 1:
+        raise ValueError(
+            "Expected one center-mask summary for the fit energy"
+        )
+
+    return deepcopy({
+        "pass_id": pass_id,
+        "started_at_utc": started_at_utc,
+        "scan_id": int(result["scan_id"]),
+        "polarization_deg": float(result["polarization_deg"]),
+        "actual_fit_energy": actual_energy,
+        "fit_settings": processing["beam_center_fit"],
+        "center_mask_settings": settings,
+        "center_mask_summary": matching[0],
+        "coarse_best": result["coarse_best"],
+        "fine_best": result["fine_best"],
+        "median_center_suggestion": median_suggestion,
+    })
+
+
 def fit_scan_beam_center(
     scan_record,
     final_mask,
@@ -683,36 +735,76 @@ def fit_scan_beam_center(
     }
 
 
-def fit_scan_set_beam_centers(
-    scans,
-    final_masks,
-    processing,
-):
-    """Fit all scans and calculate a median center suggestion."""
-    fit_results = {}
+def fit_scan_set_beam_centers(scans, processing):
+    """Store each scan's latest fit and append its pass history."""
+    if not scans:
+        raise ValueError("No scans were supplied for beam-center fitting")
+
+    processing_snapshot = deepcopy(processing)
+    pass_id = uuid4().hex
+    started_at_utc = datetime.now(timezone.utc).isoformat()
+    histories = {}
 
     for polarization, scan_record in scans.items():
-        fit_results[polarization] = fit_scan_beam_center(
+        if "final_mask" not in scan_record:
+            raise ValueError(
+                f"Scan {scan_record['scan_id']} has no final mask"
+            )
+
+        mask = scan_record["final_mask"]
+        for key in ("center_mask_settings", "center_mask_summaries"):
+            if key not in mask.attrs:
+                raise ValueError(
+                    "Center-mask metadata is missing. "
+                    "Rebuild the center and final masks before fitting."
+                )
+
+        previous_fit = scan_record.get("beam_center_fit", {})
+        history = previous_fit.get("history", [])
+
+        if not isinstance(history, list):
+            raise ValueError("Beam-center history must be a list")
+
+        histories[polarization] = deepcopy(history)
+
+    pending_results = {}
+
+    for polarization, scan_record in scans.items():
+        pending_results[polarization] = fit_scan_beam_center(
             scan_record=scan_record,
-            final_mask=final_masks[polarization],
+            final_mask=scan_record["final_mask"],
             polarization=polarization,
-            processing=processing,
+            processing=processing_snapshot,
         )
 
-    fitted_x = [
-        result["fine_best"]["x"]
-        for result in fit_results.values()
-    ]
-    fitted_y = [
-        result["fine_best"]["y"]
-        for result in fit_results.values()
-    ]
     median_suggestion = {
-        "x": float(np.median(fitted_x)),
-        "y": float(np.median(fitted_y)),
+        "x": float(np.median([
+            result["fine_best"]["x"]
+            for result in pending_results.values()
+        ])),
+        "y": float(np.median([
+            result["fine_best"]["y"]
+            for result in pending_results.values()
+        ])),
     }
 
-    return fit_results, median_suggestion
+    for polarization, result in pending_results.items():
+        histories[polarization].append(
+            _fit_history_entry(
+                result=result,
+                processing=processing_snapshot,
+                median_suggestion=median_suggestion,
+                pass_id=pass_id,
+                started_at_utc=started_at_utc,
+            )
+        )
+        result["history"] = histories[polarization]
+
+    # Update scan records only after the whole pass succeeds.
+    for polarization, result in pending_results.items():
+        scans[polarization]["beam_center_fit"] = result
+
+    return median_suggestion
 
 
 def get_shared_beam_center(processing):

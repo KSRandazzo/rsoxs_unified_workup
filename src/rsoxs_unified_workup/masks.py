@@ -1,6 +1,7 @@
 import numpy as np
 from skimage.draw import polygon2mask
 import xarray as xr
+from copy import deepcopy
 
 
 def rotated_rectangle(
@@ -346,6 +347,8 @@ def build_center_masks(
         data=center_mask_values
     )
     center_masks.name = "center_mask"
+    center_masks.attrs["center_mask_settings"] = deepcopy(settings)
+    center_masks.attrs["center_mask_summaries"] = deepcopy(summaries)
 
     return center_masks, summaries
 
@@ -355,11 +358,22 @@ def build_final_masks(
     saturation_masks,
     center_masks,
 ):
-    """Combine all mask stages for every polarization."""
+    """Combine masks and preserve the center-mask settings."""
     if saturation_masks.shape != center_masks.shape:
         raise ValueError(
             "Saturation and center masks have different shapes"
         )
+
+    metadata_keys = (
+        "center_mask_settings",
+        "center_mask_summaries",
+    )
+    for key in metadata_keys:
+        if key not in center_masks.attrs:
+            raise ValueError(
+                "Center-mask metadata is missing. "
+                "Rerun center-mask construction first."
+            )
 
     final_masks = {}
 
@@ -373,6 +387,12 @@ def build_final_masks(
             *saturation_masks.dims
         )
         final_mask.name = "final_mask"
+
+        for key in metadata_keys:
+            final_mask.attrs[key] = deepcopy(
+                center_masks.attrs[key]
+            )
+
         final_masks[polarization] = final_mask
 
     return final_masks
