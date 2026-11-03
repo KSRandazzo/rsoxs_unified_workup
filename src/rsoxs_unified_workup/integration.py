@@ -1,6 +1,7 @@
 import numpy as np
 import PyHyperScattering as phs
 import xarray as xr
+from tqdm.auto import tqdm
 
 from rsoxs_unified_workup.beam_center import (
     get_shared_beam_center,
@@ -139,22 +140,67 @@ def integrate_single_frame(
     image,
     energy,
 ):
-    """Integrate one detector image without a progress bar."""
-    integrated = integrator.integrateSingleImage(image)
-
-    if "image_num" in integrated.dims:
-        integrated = integrated.isel(image_num=0)
-
-    if "energy" not in integrated.dims:
-        integrated = integrated.expand_dims(
-            energy=[float(energy)]
+    """Integrate fixed chi bins while retaining existing q resampling."""
+    if (
+        integrator.do_1d_integration
+        or integrator.use_log_ish_binning
+        or integrator.return_sigma
+    ):
+        raise ValueError(
+            "This helper requires 2D integration, linear q, "
+            "and return_sigma=False"
         )
 
-    return integrated.transpose("energy", "chi", "q")
+    energy = float(energy)
+    image_2d = image.transpose("pix_y", "pix_x")
+    mask = np.asarray(integrator.mask, dtype=bool)
+
+    if mask.shape != image_2d.shape:
+        raise ValueError("Mask and image shapes do not match")
+
+    chi_bin_count = 360
+    chi_range = (-180.0, 180.0)
+
+    frame = integrator.createIntegrator(energy).integrate2d(
+        image_2d.values,
+        npt_rad=integrator.npts,
+        npt_azim=chi_bin_count,
+        azimuth_range=chi_range,
+        correctSolidAngle=integrator.correctSolidAngle,
+        error_model="azimuthal",
+        dummy=-8675309 if integrator.maskToNan else 0,
+        mask=mask,
+        unit="q_A^-1",
+        method=integrator.integration_method,
+    )
+
+    intensity = frame.intensity.copy()
+
+    if integrator.maskToNan:
+        intensity[intensity == -8675309] = np.nan
+
+    integrated = xr.DataArray(
+        intensity[np.newaxis, ...],
+        dims=("energy", "chi", "q"),
+        coords={
+            "energy": [energy],
+            "chi": frame.azimuthal,
+            "q": frame.radial,
+            "image_num": 0,
+        },
+        attrs=dict(image.attrs),
+    )
+
+    integrated.attrs["chi_bin_count"] = chi_bin_count
+    integrated.attrs["chi_range_degrees"] = list(chi_range)
+
+    return integrated.interp(
+        q=integrator.dest_q,
+    ).transpose("energy", "chi", "q")
 
 
 def apply_positional_mask(data, mask):
-    """Apply a same-shaped boolean mask without coordinate alignment."""
+    """Apply a mask only when dimensions and coordinates match."""
     ordered_mask = mask.transpose(*data.dims)
 
     if ordered_mask.shape != data.shape:
@@ -163,9 +209,15 @@ def apply_positional_mask(data, mask):
             f"match data shape {data.shape}"
         )
 
+    xr.align(
+        data,
+        ordered_mask,
+        join="exact",
+        copy=False,
+    )
+
     masked_data = data.copy()
     masked_data.values[ordered_mask.values] = np.nan
-
     return masked_data
 
 
@@ -203,15 +255,20 @@ def integrate_scan(scan_record, processing):
     postmask_frames = []
     clean_frames = []
 
+    energies = loaded_data.energy.values
+
     for energy_index, energy in enumerate(
-        loaded_data.energy.values
+        tqdm(
+            energies,
+            total=len(energies),
+            desc=(
+                f"Scan {scan_record['scan_id']}, "
+                f"polarization={scan_record['polarization_deg']:g}°"
+            ),
+            unit="energy",
+        )
     ):
         energy = float(energy)
-        print(
-            f"Scan {scan_record['scan_id']}: "
-            f"integrating {energy:g} eV"
-        )
-
         image = loaded_data.isel(energy=energy_index)
         mask = loaded_masks.isel(
             energy=energy_index
@@ -274,7 +331,7 @@ def integrate_scan(scan_record, processing):
         return xr.concat(
             frames,
             dim="energy",
-            join="outer",
+            join="exact",
         )
 
     remeshed = combine(remeshed_frames)
@@ -343,14 +400,20 @@ def integrate_dark_scan(scan_record, processing):
     remeshed_frames = []
     clean_frames = []
 
+    energies = loaded_data.energy.values
+
     for energy_index, energy in enumerate(
-        loaded_data.energy.values
+        tqdm(
+            energies,
+            total=len(energies),
+            desc=(
+                f"Dark scan {scan_record['scan_id']}, "
+                f"polarization={scan_record['polarization_deg']:g}°"
+            ),
+            unit="energy",
+        )
     ):
         energy = float(energy)
-        print(
-            f"Scan {scan_record['scan_id']}: "
-            f"integrating dark time=0 at {energy:g} eV"
-        )
 
         mask = loaded_masks.isel(
             energy=energy_index
@@ -389,12 +452,12 @@ def integrate_dark_scan(scan_record, processing):
     darks_remeshed = xr.concat(
         remeshed_frames,
         dim="energy",
-        join="outer",
+        join="exact",
     )
     darks_clean = xr.concat(
         clean_frames,
         dim="energy",
-        join="outer",
+        join="exact",
     )
 
     return {

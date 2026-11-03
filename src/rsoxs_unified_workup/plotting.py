@@ -5,9 +5,73 @@ from matplotlib.patches import Circle, Patch, Wedge
 import matplotlib.ticker as mticker
 
 
+def review_energy_indices(scan_record, processing, energy_values):
+    """Select frames nearest the requested review energies, in eV."""
+    available = np.asarray(energy_values, dtype=float)
+
+    if (
+        available.ndim != 1
+        or available.size == 0
+        or not np.all(np.isfinite(available))
+    ):
+        raise ValueError(
+            "Available energies must be a nonempty, finite 1D array"
+        )
+
+    plotting = processing.get("plotting", {})
+
+    if "energy_indices" in plotting:
+        raise ValueError(
+            "Replace plotting.energy_indices with plotting.energies_ev"
+        )
+
+    requested = plotting.get("energies_ev")
+
+    if requested is None:
+        if scan_record["scan_type"] == "repeats":
+            return list(range(available.size))
+
+        raise ValueError(
+            "Specify [plotting] energies_ev for "
+            f"scan_type={scan_record['scan_type']!r}"
+        )
+
+    if not isinstance(requested, list) or not requested:
+        raise ValueError(
+            "plotting.energies_ev must be a nonempty list"
+        )
+
+    if any(
+        isinstance(energy, bool)
+        or not isinstance(energy, (int, float))
+        or not np.isfinite(energy)
+        or energy <= 0
+        for energy in requested
+    ):
+        raise ValueError(
+            "Requested energies must be positive, finite numbers in eV"
+        )
+
+    indices = []
+
+    for energy in requested:
+        index = int(np.argmin(np.abs(available - energy)))
+
+        print(
+            f"Scan {scan_record['scan_id']}: "
+            f"requested {energy:g} eV "
+            f"-> selected {available[index]:g} eV"
+        )
+
+        if index not in indices:
+            indices.append(index)
+
+    return indices
+
+
 def plot_raw_frames(
     scans,
-    energy_indices=(0, 1),
+    processing,
     vmin=1e2,
     vmax=1e6,
     cmap="jet",
@@ -17,6 +81,11 @@ def plot_raw_frames(
         for polarization, scan_data in scans.items():
             data = scan_data["data"]
             energy_values = data.energy.values
+            energy_indices = review_energy_indices(
+                scan_record=scan_data,
+                processing=processing,
+                energy_values=energy_values,
+            )
             frame_count = len(energy_indices)
 
             fig, axes = plt.subplots(
@@ -35,7 +104,7 @@ def plot_raw_frames(
                     origin="lower",
                 )
                 axis.set_title(
-                    f"Energy = {energy_values[index]:.1f} eV"
+                    f"Energy = {energy_values[index]:g} eV"
                 )
                 axis.axis("off")
 
@@ -284,15 +353,21 @@ def plot_static_mask_overlays(
 def plot_saturation_overlays(
     scans,
     saturation_masks,
+    processing,
     vmin=1e1,
     vmax=1e6,
     cmap="jet",
 ):
-    """Overlay unioned saturated pixels on every scan frame."""
+    """Overlay unioned saturated pixels on selected scan frames."""
     row_count = len(scans)
     energy_dimension = saturation_masks.energy.dims[0]
-    energy_count = saturation_masks.sizes[energy_dimension]
 
+    energy_indices = review_energy_indices(
+        scan_record=next(iter(scans.values())),
+        processing=processing,
+        energy_values=saturation_masks.energy.values,
+    )
+    energy_count = len(energy_indices)
     fig, axes = plt.subplots(
         row_count,
         energy_count,
@@ -310,8 +385,8 @@ def plot_saturation_overlays(
         masked_data = scan_data["masked_data_static"]
         frame_dimension = masked_data.energy.dims[0]
 
-        for index in range(energy_count):
-            axis = axes[row, index]
+        for column, index in enumerate(energy_indices):
+            axis = axes[row, column]
             frame = masked_data.isel(
                 {frame_dimension: index}
             ).values
@@ -339,7 +414,7 @@ def plot_saturation_overlays(
                 f"Scan {scan_data['scan_id']}, "
                 f"polarization={polarization}°\n"
                 f"Energy="
-                f"{masked_data.energy.values[index]:.1f} eV; "
+                f"{masked_data.energy.values[index]:g} eV; "
                 f"{len(x_positions):,} saturated pixels"
             )
             axis.set_xlabel("Pixel x")
@@ -370,11 +445,18 @@ def plot_center_mask_review(
     saturation_masks,
     center_masks,
     summaries,
-    settings,
+    processing,
 ):
-    """Review center-mask radius selection for each energy."""
+    """Review center-mask radius selection at selected energies."""
+    settings = processing["center_mask"]
     energy_dimension = saturation_masks.energy.dims[0]
-    energy_count = saturation_masks.sizes[energy_dimension]
+
+    energy_indices = review_energy_indices(
+        scan_record=next(iter(scans.values())),
+        processing=processing,
+        energy_values=saturation_masks.energy.values,
+    )
+    energy_count = len(energy_indices)
 
     fig, axes = plt.subplots(
         energy_count,
@@ -390,12 +472,14 @@ def plot_center_mask_review(
     center_x = settings["beam_center_x_guess"]
     center_y = settings["beam_center_y_guess"]
 
-    for index, summary in enumerate(summaries):
+    for index, energy_index in enumerate(energy_indices):
+        summary = summaries[energy_index]
+
         saturation = saturation_masks.isel(
-            {energy_dimension: index}
+            {energy_dimension: energy_index}
         ).values
         center_mask = center_masks.isel(
-            {energy_dimension: index}
+            {energy_dimension: energy_index}
         ).values
 
         x_min, x_max, y_min, y_max = summary[
@@ -422,7 +506,7 @@ def plot_center_mask_review(
             label="Beam-center guess",
         )
         axes[index, 0].set_title(
-            f"Energy={summary['energy']:.1f} eV\n"
+            f"Energy={summary['energy']:g} eV\n"
             f"Radius={summary['radius']:.2f} pixels "
             f"from {summary['radius_source']}"
         )
@@ -462,17 +546,22 @@ def plot_center_mask_review(
 
 def plot_final_masked_frames(
     scans,
-    center_settings,
+    processing,
     vmin=1e1,
     vmax=1e6,
     cmap="jet",
 ):
-    """Review final masked frames and outer usable radius."""
+    """Review selected final masked frames and outer usable radius."""
+    center_settings = processing["center_mask"]
     row_count = len(scans)
     first_scan = next(iter(scans.values()))
-    energy_count = first_scan[
-        "masked_data_final"
-    ].sizes["system"]
+
+    energy_indices = review_energy_indices(
+        scan_record=first_scan,
+        processing=processing,
+        energy_values=first_scan["masked_data_final"].energy.values,
+    )
+    energy_count = len(energy_indices)
 
     fig, axes = plt.subplots(
         row_count,
@@ -494,8 +583,8 @@ def plot_final_masked_frames(
     ):
         data = scan_data["masked_data_final"]
 
-        for index in range(energy_count):
-            axis = axes[row, index]
+        for column, index in enumerate(energy_indices):
+            axis = axes[row, column]
             frame = data.isel(system=index)
 
             image = axis.imshow(
@@ -518,7 +607,7 @@ def plot_final_masked_frames(
                 f"{scan_data['sample_name']}: "
                 f"Scan {scan_data['scan_id']}, "
                 f"polarization={polarization}°\n"
-                f"Energy={data.energy.values[index]:.1f} eV"
+                f"Energy={data.energy.values[index]:g} eV"
             )
             axis.set_xlabel("Pixel x")
             axis.set_ylabel("Pixel y")
@@ -713,7 +802,7 @@ def plot_beam_center_fit(fit_result, scan_record):
         plt.close(fig)
 
 
-def plot_integration_review(scan_record):
+def plot_integration_review(scan_record, processing):
     """Review integration results stored inside one scan record."""
     result = scan_record["integration"]
     datasets = [
@@ -751,9 +840,15 @@ def plot_integration_review(scan_record):
         (0.11, -100, "lawngreen"),
     ]
 
-    for energy_index, energy in enumerate(
-        result["remeshed"].energy.values
-    ):
+    energy_values = result["remeshed"].energy.values
+    energy_indices = review_energy_indices(
+        scan_record=scan_record,
+        processing=processing,
+        energy_values=energy_values,
+    )
+
+    for energy_index in energy_indices:
+        energy = float(energy_values[energy_index])
         q_cap = float(
             result["q_cap"].sel(
                 energy=energy,
@@ -848,11 +943,12 @@ def plot_integration_review(scan_record):
 
 def plot_dark_integration_review(
     scan_record,
-    upper_percentile,
+    processing,
 ):
     """Compare the selected raw dark with its stored integrated result."""
     result = scan_record["dark_integration"]
     original_dark = result["original_dark"]
+    upper_percentile = processing["darks"]["upper_percentile"]
     vmin = float(np.nanmin(original_dark.values))
     vmax = float(
         np.nanpercentile(
@@ -867,9 +963,15 @@ def plot_dark_integration_review(
         (0.12, -90, "goldenrod"),
     ]
 
-    for energy_index, energy in enumerate(
-        result["darks_clean"].energy.values
-    ):
+    energy_values = result["darks_clean"].energy.values
+    energy_indices = review_energy_indices(
+        scan_record,
+        processing,
+        energy_values,
+    )
+
+    for energy_index in energy_indices:
+        energy = float(energy_values[energy_index])
         integrated_dark = result[
             "darks_clean"
         ].isel(energy=energy_index)
@@ -961,14 +1063,20 @@ def plot_dark_integration_review(
             plt.close(fig)
 
 
-def plot_normalization_review(scans):
+def plot_normalization_review(scans, processing):
     """Compare normalization factors stored inside the scan records."""
     first_scan = next(iter(scans.values()))
     first_result = first_scan["normalization"]
 
-    for energy in first_result[
-        "full_ring_mean"
-    ].energy.values:
+    energy_values = first_result["full_ring_mean"].energy.values
+    energy_indices = review_energy_indices(
+        first_scan,
+        processing,
+        energy_values,
+    )
+
+    for energy_index in energy_indices:
+        energy = float(energy_values[energy_index])
         with plt.style.context("dark_background"):
             fig, axes = plt.subplots(
                 1,
@@ -1039,7 +1147,7 @@ def plot_normalization_review(scans):
             plt.close(fig)
 
 
-def plot_flux_correction_review(scans):
+def plot_flux_correction_review(scans, processing):
     """Review flux correction stored inside the scan records."""
     first_scan = next(iter(scans.values()))
     first_result = first_scan["flux_correction"]
@@ -1083,9 +1191,15 @@ def plot_flux_correction_review(scans):
         plt.show()
         plt.close(fig)
 
-    for energy in first_result[
-        "flux_corrected"
-    ].energy.values:
+    energy_values = first_result["flux_corrected"].energy.values
+    energy_indices = review_energy_indices(
+        first_scan,
+        processing,
+        energy_values,
+    )
+
+    for energy_index in energy_indices:
+        energy = float(energy_values[energy_index])
         with plt.style.context("dark_background"):
             fig, axes = plt.subplots(
                 1,
@@ -1507,17 +1621,25 @@ def plot_aggregate_anisotropy_comparison(
 def plot_pointwise_anisotropy_review(
     scans,
     pointwise_results,
+    processing,
     anisotropy_limit=0.15,
     difference_limit=0.15,
 ):
+
     """Review stitched pointwise anisotropy maps."""
     first_scan = next(iter(scans.values()))
 
     for mode, pair_results in pointwise_results.items():
         for pair_id, result in pair_results.items():
             energies = result["anisotropy"].energy.values
+            energy_indices = review_energy_indices(
+                first_scan,
+                processing,
+                energies,
+            )
 
-            for energy_index, energy in enumerate(energies):
+            for energy_index in energy_indices:
+                energy = float(energies[energy_index])
                 parallel = result["parallel"].isel(
                     energy=energy_index
                 )

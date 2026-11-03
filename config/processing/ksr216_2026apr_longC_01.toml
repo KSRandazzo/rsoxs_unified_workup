@@ -52,3 +52,6 @@ half_ring_halfwidth_degrees = 90
 
 [flux_correction]
 enabled = true
+
+[plotting]
+energies_ev = [284.8, 286.0]
