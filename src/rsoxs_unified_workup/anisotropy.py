@@ -93,21 +93,22 @@ def assign_parallel_perpendicular(
 
 
 def calculate_sector_anisotropy(
-    normalized_data,
+    scans,
+    normalization_key,
     sector,
     parallel_polarization,
     perpendicular_polarization,
 ):
     """Calculate anisotropy for one normalization and sector."""
     parallel_slice = select_chi_region(
-        normalized_data[parallel_polarization],
+        scans[parallel_polarization]["normalization"][normalization_key],
         center_degrees=sector["chi_center_deg"],
         halfwidth_degrees=sector[
             "chi_halfwidth_deg"
         ],
     )
     perpendicular_slice = select_chi_region(
-        normalized_data[perpendicular_polarization],
+        scans[perpendicular_polarization]["normalization"][normalization_key],
         center_degrees=sector["chi_center_deg"],
         halfwidth_degrees=sector[
             "chi_halfwidth_deg"
@@ -151,20 +152,12 @@ def calculate_sector_anisotropy(
 
 def calculate_anisotropy(
     configuration,
-    normalization_results,
+    scans,
 ):
     """Calculate every configured sector for both normalizations."""
     pairs_by_id = {
         pair["pair_id"]: pair
         for pair in configuration["polarization_pairs"]
-    }
-    normalized_by_mode = {
-        mode: {
-            polarization: result[data_key]
-            for polarization, result
-            in normalization_results.items()
-        }
-        for mode, data_key in NORMALIZATION_MODES.items()
     }
     results = {
         mode: {}
@@ -194,11 +187,10 @@ def calculate_anisotropy(
             )
         )
 
-        for mode, normalized_data in (
-            normalized_by_mode.items()
-        ):
+        for mode, normalization_key in NORMALIZATION_MODES.items():
             calculation = calculate_sector_anisotropy(
-                normalized_data=normalized_data,
+                scans=scans,
+                normalization_key=normalization_key,
                 sector=sector,
                 parallel_polarization=parallel,
                 perpendicular_polarization=perpendicular,

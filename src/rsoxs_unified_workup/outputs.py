@@ -66,24 +66,25 @@ def _use_reference_grid(
 
 
 def _stack_by_polarization(
-    records,
+    scans,
+    section,
     key,
     name,
-    reference_records=None,
+    align_to_clean=False,
 ):
-    """Stack one DataArray from each polarization."""
+    """Stack one stored scan product across polarizations."""
     arrays = []
 
-    for polarization in sorted(
-        records,
-        key=float,
-    ):
-        array = records[polarization][key]
-        if reference_records is not None:
+    for polarization in sorted(scans, key=float):
+        scan_record = scans[polarization]
+        array = scan_record[section][key]
+
+        if align_to_clean:
             array = _use_reference_grid(
                 array,
-                reference_records[polarization],
+                scan_record["integration"]["clean"],
             )
+
         arrays.append(
             array.expand_dims(
                 polarization=[
@@ -101,101 +102,79 @@ def _stack_by_polarization(
     return combined
 
 
-def build_scan_products_dataset(
-    integration_results,
-    dark_integration_results,
-    normalization_results,
-    flux_correction_results,
-):
-    """Collect final and diagnostic scan products."""
-    clean_references = {
-        polarization: result["clean"]
-        for polarization, result
-        in integration_results.items()
-    }
-    data_vars = {
-        "remeshed": _stack_by_polarization(
-            integration_results,
-            "remeshed",
-            "remeshed",
-        ),
-        "source_fraction": _stack_by_polarization(
-            integration_results,
-            "source_fraction",
-            "source_fraction",
-            reference_records=clean_references,
-        ),
-        "postmask": _stack_by_polarization(
-            integration_results,
-            "postmask",
-            "postmask",
-            reference_records=clean_references,
-        ),
-        "clean_uncapped_q": _stack_by_polarization(
-            integration_results,
-            "clean_uncapped_q",
-            "clean_uncapped_q",
-        ),
-        "clean": _stack_by_polarization(
-            integration_results,
-            "clean",
-            "clean",
-        ),
-        "q_cap": _stack_by_polarization(
-            integration_results,
-            "q_cap",
-            "q_cap",
-        ),
-        "darks_remeshed": _stack_by_polarization(
-            dark_integration_results,
-            "darks_remeshed",
-            "darks_remeshed",
-        ),
-        "darks_clean": _stack_by_polarization(
-            dark_integration_results,
-            "darks_clean",
-            "darks_clean",
-        ),
-        "full_ring_mean": _stack_by_polarization(
-            normalization_results,
-            "full_ring_mean",
-            "full_ring_mean",
-        ),
-        "half_ring_mean": _stack_by_polarization(
-            normalization_results,
-            "half_ring_mean",
-            "half_ring_mean",
-        ),
-        "full_ring_normalized": (
-            _stack_by_polarization(
-                normalization_results,
-                "full_ring_normalized",
-                "full_ring_normalized",
-            )
-        ),
-        "half_ring_normalized": (
-            _stack_by_polarization(
-                normalization_results,
-                "half_ring_normalized",
-                "half_ring_normalized",
-            )
-        ),
-    }
+def build_scan_products_dataset(scans):
+    """Collect final and diagnostic products from nested scan records."""
+    if not scans:
+        raise ValueError("No scans supplied")
 
-    if flux_correction_results:
-        data_vars["au_mesh_current"] = (
-            _stack_by_polarization(
-                flux_correction_results,
-                "flux",
-                "au_mesh_current",
+    products = [
+        (
+            "integration",
+            (
+                "remeshed",
+                "source_fraction",
+                "postmask",
+                "clean_uncapped_q",
+                "clean",
+                "q_cap",
+            ),
+        ),
+        (
+            "dark_integration",
+            (
+                "darks_remeshed",
+                "darks_clean",
+            ),
+        ),
+        (
+            "normalization",
+            (
+                "full_ring_mean",
+                "half_ring_mean",
+                "full_ring_normalized",
+                "half_ring_normalized",
+            ),
+        ),
+    ]
+
+    data_vars = {}
+
+    for section, keys in products:
+        for key in keys:
+            data_vars[key] = _stack_by_polarization(
+                scans=scans,
+                section=section,
+                key=key,
+                name=key,
+                align_to_clean=key in (
+                    "source_fraction",
+                    "postmask",
+                ),
             )
+
+    has_flux = [
+        bool(scan_record["flux_correction"])
+        for scan_record in scans.values()
+    ]
+
+    if any(has_flux):
+        if not all(has_flux):
+            raise ValueError(
+                "Flux correction is present for only some scans. "
+                "Rerun the flux-correction cell for the whole set."
+            )
+
+        data_vars["au_mesh_current"] = _stack_by_polarization(
+            scans=scans,
+            section="flux_correction",
+            key="flux",
+            name="au_mesh_current",
         )
-        data_vars["flux_corrected"] = (
-            _stack_by_polarization(
-                flux_correction_results,
-                "flux_corrected",
-                "flux_corrected",
-            )
+        data_vars["flux_corrected"] = _stack_by_polarization(
+            scans=scans,
+            section="flux_correction",
+            key="flux_corrected",
+            name="flux_corrected",
         )
 
     dataset = xr.Dataset(data_vars)
@@ -633,10 +612,7 @@ def _prepare_zarr_dataset(dataset):
 
 def save_workup_results(
     configuration,
-    integration_results,
-    dark_integration_results,
-    normalization_results,
-    flux_correction_results,
+    scans,
     anisotropy_results,
     aggregate_anisotropy_results,
     pointwise_anisotropy_results,
@@ -645,12 +621,7 @@ def save_workup_results(
 ):
     """Save one complete workup as Zarr plus JSON metadata."""
     datasets = {
-        "scan_products": build_scan_products_dataset(
-            integration_results,
-            dark_integration_results,
-            normalization_results,
-            flux_correction_results,
-        ),
+        "scan_products": build_scan_products_dataset(scans),
         "sector_anisotropy": (
             build_sector_anisotropy_dataset(
                 anisotropy_results

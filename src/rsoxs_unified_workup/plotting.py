@@ -713,8 +713,9 @@ def plot_beam_center_fit(fit_result, scan_record):
         plt.close(fig)
 
 
-def plot_integration_review(scan_record, result):
-    """Review each stage of final integration at every energy."""
+def plot_integration_review(scan_record):
+    """Review integration results stored inside one scan record."""
+    result = scan_record["integration"]
     datasets = [
         ("remeshed", "Integrated data", "Intensity"),
         (
@@ -847,10 +848,10 @@ def plot_integration_review(scan_record, result):
 
 def plot_dark_integration_review(
     scan_record,
-    result,
     upper_percentile,
 ):
-    """Compare the selected raw dark with its integrated result."""
+    """Compare the selected raw dark with its stored integrated result."""
+    result = scan_record["dark_integration"]
     original_dark = result["original_dark"]
     vmin = float(np.nanmin(original_dark.values))
     vmax = float(
@@ -960,15 +961,10 @@ def plot_dark_integration_review(
             plt.close(fig)
 
 
-def plot_normalization_review(
-    scans,
-    normalization_results,
-):
-    """Compare full-ring and half-ring normalization factors."""
+def plot_normalization_review(scans):
+    """Compare normalization factors stored inside the scan records."""
     first_scan = next(iter(scans.values()))
-    first_result = next(
-        iter(normalization_results.values())
-    )
+    first_result = first_scan["normalization"]
 
     for energy in first_result[
         "full_ring_mean"
@@ -981,9 +977,8 @@ def plot_normalization_review(
                 constrained_layout=True,
             )
 
-            for polarization, result in (
-                normalization_results.items()
-            ):
+            for polarization, scan_record in scans.items():
+                result = scan_record["normalization"]
                 full_mean = result[
                     "full_ring_mean"
                 ].sel(energy=energy)
@@ -1044,14 +1039,14 @@ def plot_normalization_review(
             plt.close(fig)
 
 
-def plot_flux_correction_review(
-    scans,
-    integration_results,
-    flux_results,
-):
-    """Review Au-mesh flux values and corrected intensities."""
+def plot_flux_correction_review(scans):
+    """Review flux correction stored inside the scan records."""
     first_scan = next(iter(scans.values()))
-    first_result = next(iter(flux_results.values()))
+    first_result = first_scan["flux_correction"]
+
+    if not first_result:
+        print("Flux correction is disabled; skipping its review plots.")
+        return
 
     with plt.style.context("dark_background"):
         fig, axis = plt.subplots(
@@ -1061,7 +1056,8 @@ def plot_flux_correction_review(
             constrained_layout=True,
         )
 
-        for polarization, result in flux_results.items():
+        for polarization, scan_record in scans.items():
+            result = scan_record["flux_correction"]
             flux = result["flux"]
             axis.plot(
                 flux.energy,
@@ -1098,12 +1094,9 @@ def plot_flux_correction_review(
                 constrained_layout=True,
             )
 
-            for polarization, flux_result in (
-                flux_results.items()
-            ):
-                raw_mean = integration_results[
-                    polarization
-                ]["clean"].sel(
+            for polarization, scan_record in scans.items():
+                flux_result = scan_record["flux_correction"]
+                raw_mean = scan_record["integration"]["clean"].sel(
                     energy=energy
                 ).mean("chi", skipna=True)
                 corrected_mean = flux_result[

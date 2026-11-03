@@ -169,14 +169,16 @@ def apply_positional_mask(data, mask):
     return masked_data
 
 
-def integrate_scan(
-    scan_record,
-    final_mask,
-    shared_center,
-    outer_radius_pixels,
-    postmask_threshold,
-):
-    """Integrate every energy using its own detector mask."""
+def integrate_scan(scan_record, processing):
+    """Integrate one scan using its stored mask and processing settings."""
+    final_mask = scan_record["final_mask"]
+    shared_center = get_shared_beam_center(processing)
+    outer_radius_pixels = float(
+        processing["center_mask"]["outer_usable_radius"]
+    )
+    postmask_threshold = float(
+        processing["integration"]["postmask_threshold"]
+    )
     if not 0 <= postmask_threshold <= 1:
         raise ValueError(
             "postmask_threshold must be between 0 and 1"
@@ -308,49 +310,11 @@ def integrate_scan(
     }
 
 
-def integrate_scan_set(
-    scans,
-    final_masks,
-    processing,
-):
-    """Integrate every polarization using one reviewed center."""
+def integrate_dark_scan(scan_record, processing):
+    """Integrate the first dark frame using this scan's stored results."""
+    final_mask = scan_record["final_mask"]
     shared_center = get_shared_beam_center(processing)
-    outer_radius = float(
-        processing["center_mask"]["outer_usable_radius"]
-    )
-    postmask_threshold = float(
-        processing["integration"][
-            "postmask_threshold"
-        ]
-    )
-
-    results = {}
-
-    for polarization, scan_record in scans.items():
-        if polarization not in final_masks:
-            raise ValueError(
-                f"No final mask for polarization "
-                f"{polarization}°"
-            )
-
-        results[polarization] = integrate_scan(
-            scan_record=scan_record,
-            final_mask=final_masks[polarization],
-            shared_center=shared_center,
-            outer_radius_pixels=outer_radius,
-            postmask_threshold=postmask_threshold,
-        )
-
-    return results
-
-
-def integrate_dark_scan(
-    scan_record,
-    final_mask,
-    shared_center,
-    integration_result,
-):
-    """Integrate the first dark frame at every scan energy."""
+    integration_result = scan_record["integration"]
     darks = scan_record["darks"]
 
     if "time" in darks.dims:
@@ -445,39 +409,3 @@ def integrate_dark_scan(
         ],
         "darks_clean": darks_clean,
     }
-
-
-def integrate_dark_scan_set(
-    scans,
-    final_masks,
-    integration_results,
-    processing,
-):
-    """Integrate the first dark frame for every polarization."""
-    shared_center = get_shared_beam_center(processing)
-    dark_results = {}
-
-    for polarization, scan_record in scans.items():
-        if polarization not in final_masks:
-            raise ValueError(
-                f"No final mask for polarization "
-                f"{polarization}°"
-            )
-        if polarization not in integration_results:
-            raise ValueError(
-                f"No final integration result for "
-                f"polarization {polarization}°"
-            )
-
-        dark_results[polarization] = (
-            integrate_dark_scan(
-                scan_record=scan_record,
-                final_mask=final_masks[polarization],
-                shared_center=shared_center,
-                integration_result=(
-                    integration_results[polarization]
-                ),
-            )
-        )
-
-    return dark_results

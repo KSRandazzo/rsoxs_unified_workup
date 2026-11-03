@@ -43,9 +43,10 @@ def select_chi_region(
     return data.isel(chi=np.flatnonzero(selected))
 
 
-def normalize_scan(integration_result, settings):
-    """Calculate full-ring and configured half-ring normalization."""
-    clean = integration_result["clean"]
+def normalize_scan(scan_record, processing):
+    """Normalize the integrated intensity stored inside one scan record."""
+    settings = processing["normalization"]
+    clean = scan_record["integration"]["clean"]
     half_ring = select_chi_region(
         clean,
         center_degrees=settings[
@@ -90,29 +91,14 @@ def normalize_scan(integration_result, settings):
     }
 
 
-def normalize_scan_set(
-    integration_results,
-    processing,
-):
-    """Normalize every polarization in a scan set."""
-    settings = processing["normalization"]
+def flux_correct_scan(scan_record, processing):
+    """Optionally flux-correct the integrated intensity of one scan."""
+    settings = processing.get("flux_correction", {})
 
-    return {
-        polarization: normalize_scan(
-            integration_result=result,
-            settings=settings,
-        )
-        for polarization, result
-        in integration_results.items()
-    }
+    if not settings.get("enabled", False):
+        return {}
 
-
-def flux_correct_scan(
-    scan_record,
-    integration_result,
-):
-    """Correct integrated intensity using Au mesh current."""
-    clean = integration_result["clean"]
+    clean = scan_record["integration"]["clean"]
     monitor = scan_record["au_mesh_current"]
     monitor_values = np.asarray(
         monitor.values,
@@ -167,28 +153,4 @@ def flux_correct_scan(
     return {
         "flux": flux,
         "flux_corrected": flux_corrected,
-    }
-
-
-def flux_correct_scan_set(
-    scans,
-    integration_results,
-    processing,
-):
-    """Optionally flux-correct every polarization."""
-    settings = processing.get(
-        "flux_correction",
-        {},
-    )
-
-    if not settings.get("enabled", False):
-        return {}
-
-    return {
-        polarization: flux_correct_scan(
-            scan_record=scans[polarization],
-            integration_result=result,
-        )
-        for polarization, result
-        in integration_results.items()
     }
