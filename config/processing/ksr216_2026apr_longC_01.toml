@@ -16,7 +16,7 @@ bottom_pixels = 6
 top_pixels = 6
 
 [center_mask]
-beam_center_x_guess = 473.1
+beam_center_x_guess = 472.9
 beam_center_y_guess = 514.7
 saturation_search_width = 90
 outer_usable_radius = 459
