@@ -734,3 +734,139 @@ def save_workup_results(
         "manifest": manifest_path,
         "groups": list(datasets),
     }
+
+
+def print_workup_export_tree(
+    save_summary,
+    *,
+    include_array_attributes=False,
+):
+    """Print a saved export's structure without loading its data."""
+    manifest_path = Path(save_summary["manifest"])
+    store_path = Path(save_summary["zarr_store"])
+
+    with manifest_path.open() as file:
+        manifest = json.load(file)
+
+    store = zarr.open_consolidated(
+        str(store_path),
+        mode="r",
+    )
+
+    def metadata_node(name, value):
+        if isinstance(value, dict):
+            return (
+                f"{name} [dictionary]",
+                [
+                    metadata_node(str(key), item)
+                    for key, item in value.items()
+                ],
+            )
+
+        if isinstance(value, list):
+            if any(
+                isinstance(item, (dict, list))
+                for item in value
+            ):
+                return (
+                    f"{name} [list: {len(value)} entries]",
+                    [
+                        metadata_node(f"[{index}]", item)
+                        for index, item in enumerate(value)
+                    ],
+                )
+
+            if len(value) > 8:
+                preview = json.dumps(
+                    value[:3],
+                    ensure_ascii=False,
+                )
+                return (
+                    f"{name}: {preview[:-1]}, ...] "
+                    f"({len(value)} entries)",
+                    [],
+                )
+
+        text = json.dumps(value, ensure_ascii=False)
+        if len(text) > 160:
+            text = text[:157] + "..."
+
+        return (f"{name}: {text}", [])
+
+    def array_node(name, array):
+        dimensions = tuple(
+            array.attrs.get("_ARRAY_DIMENSIONS", [])
+        )
+        children = []
+
+        if include_array_attributes:
+            attributes = dict(array.attrs)
+            attributes.pop("_ARRAY_DIMENSIONS", None)
+
+            if attributes:
+                children.append(
+                    metadata_node("attributes", attributes)
+                )
+
+        return (
+            f"{name}: dims={dimensions}, "
+            f"shape={array.shape}, dtype={array.dtype}",
+            children,
+        )
+
+    group_nodes = []
+
+    for group_name in sorted(store.group_keys()):
+        group = store[group_name]
+        variable_names = set(
+            manifest["zarr_groups"][group_name]
+        )
+        array_names = sorted(group.array_keys())
+
+        children = [
+            (
+                "data variables",
+                [
+                    array_node(name, group[name])
+                    for name in array_names
+                    if name in variable_names
+                ],
+            ),
+            (
+                "coordinates",
+                [
+                    array_node(name, group[name])
+                    for name in array_names
+                    if name not in variable_names
+                ],
+            ),
+        ]
+
+        if group.attrs:
+            children.append(
+                metadata_node(
+                    "attributes",
+                    dict(group.attrs),
+                )
+            )
+
+        group_nodes.append(
+            (f"{group_name}/ [xarray Dataset]", children)
+        )
+
+    nodes = [
+        metadata_node(manifest_path.name, manifest),
+        (f"{store_path.name}/ [Zarr store]", group_nodes),
+    ]
+
+    def print_nodes(items, prefix=""):
+        for index, (label, children) in enumerate(items):
+            last = index == len(items) - 1
+            connector = "└── " if last else "├── "
+            print(prefix + connector + label)
+
+            child_prefix = "    " if last else "│   "
+            print_nodes(children, prefix + child_prefix)
+
+    print(f"{store_path.parent}/")
+    print_nodes(nodes)
