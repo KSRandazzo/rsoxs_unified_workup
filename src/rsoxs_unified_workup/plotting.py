@@ -448,7 +448,7 @@ def plot_center_mask_review(
     processing,
 ):
     """Review center-mask radius selection at selected energies."""
-    settings = processing["center_mask"]
+    center = center_masks.attrs["beam_center"]
     energy_dimension = saturation_masks.energy.dims[0]
 
     energy_indices = review_energy_indices(
@@ -469,8 +469,8 @@ def plot_center_mask_review(
         2,
     )
 
-    center_x = settings["beam_center_x_guess"]
-    center_y = settings["beam_center_y_guess"]
+    center_x = center["x"]
+    center_y = center["y"]
 
     for index, energy_index in enumerate(energy_indices):
         summary = summaries[energy_index]
@@ -552,9 +552,10 @@ def plot_final_masked_frames(
     cmap="jet",
 ):
     """Review selected final masked frames and outer usable radius."""
-    center_settings = processing["center_mask"]
     row_count = len(scans)
     first_scan = next(iter(scans.values()))
+    center = first_scan["final_mask"].attrs["beam_center"]
+    center_settings = first_scan["final_mask"].attrs["center_mask_settings"]
 
     energy_indices = review_energy_indices(
         scan_record=first_scan,
@@ -574,8 +575,8 @@ def plot_final_masked_frames(
         energy_count,
     )
 
-    center_x = center_settings["beam_center_x_guess"]
-    center_y = center_settings["beam_center_y_guess"]
+    center_x = center["x"]
+    center_y = center["y"]
     outer_radius = center_settings["outer_usable_radius"]
 
     for row, (polarization, scan_data) in enumerate(
@@ -1342,10 +1343,10 @@ def plot_anisotropy_sector_overlays(
 ):
     """Overlay configured anisotropy sectors on detector frames."""
     processing = configuration["processing"]
-    shared_center = processing["shared_beam_center"]
+    first_scan = next(iter(scans.values()))
     center = (
-        shared_center["center_x"],
-        shared_center["center_y"],
+        first_scan["integration"]["beam_center_x"],
+        first_scan["integration"]["beam_center_y"],
     )
     scan_by_id = {
         int(record["scan_id"]): record

@@ -4,7 +4,7 @@ import xarray as xr
 from tqdm.auto import tqdm
 
 from rsoxs_unified_workup.beam_center import (
-    get_shared_beam_center,
+    get_approved_beam_center,
 )
 
 
@@ -224,7 +224,10 @@ def apply_positional_mask(data, mask):
 def integrate_scan(scan_record, processing):
     """Integrate one scan using its stored mask and processing settings."""
     final_mask = scan_record["final_mask"]
-    shared_center = get_shared_beam_center(processing)
+    shared_center = get_approved_beam_center(
+        scan_record,
+        processing,
+    )
     outer_radius_pixels = float(
         processing["center_mask"]["outer_usable_radius"]
     )
@@ -370,7 +373,10 @@ def integrate_scan(scan_record, processing):
 def integrate_dark_scan(scan_record, processing):
     """Integrate the first dark frame using this scan's stored results."""
     final_mask = scan_record["final_mask"]
-    shared_center = get_shared_beam_center(processing)
+    shared_center = get_approved_beam_center(
+        scan_record,
+        processing,
+    )
     integration_result = scan_record["integration"]
     darks = scan_record["darks"]
 

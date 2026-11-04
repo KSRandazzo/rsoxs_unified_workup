@@ -16,14 +16,10 @@ bottom_pixels = 6
 top_pixels = 6
 
 [center_mask]
-beam_center_x_guess = 472.9
-beam_center_y_guess = 514.7
 saturation_search_width = 90
 outer_usable_radius = 459
 
 [beam_center_fit]
-initial_center_x = 472
-initial_center_y = 515
 coarse_search_radius = 4
 coarse_step = 1
 fine_search_radius = 0.8
@@ -39,7 +35,7 @@ apply_postmask = true
 [runtime]
 beam_center_jobs = 32
 
-[shared_beam_center]
+[beam_center]
 center_x = 472.9
 center_y = 514.7
 

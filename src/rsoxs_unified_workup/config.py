@@ -1,7 +1,8 @@
 from pathlib import Path
-
 import tomllib
 import pandas as pd
+from math import isfinite
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_DIR = PROJECT_ROOT / "config"
@@ -13,6 +14,40 @@ TABLE_FILES = {
     "polarization_pairs": "polarization_pairs.csv",
     "anisotropy_sectors": "anisotropy_sectors.csv",
 }
+
+
+def get_beam_center(processing):
+    """Read the single configured center used throughout the workup."""
+    obsolete_keys = {
+        "center_mask": ("beam_center_x_guess", "beam_center_y_guess"),
+        "beam_center_fit": ("initial_center_x", "initial_center_y"),
+    }
+
+    if "shared_beam_center" in processing or any(
+        key in processing.get(section, {})
+        for section, keys in obsolete_keys.items()
+        for key in keys
+    ):
+        raise ValueError(
+            "Remove the old center-coordinate settings. "
+            "Use only [beam_center] center_x and center_y."
+        )
+
+    try:
+        settings = processing["beam_center"]
+        center = {
+            "x": float(settings["center_x"]),
+            "y": float(settings["center_y"]),
+        }
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "Add numeric center_x and center_y under [beam_center]."
+        ) from error
+
+    if not all(isfinite(value) for value in center.values()):
+        raise ValueError("Beam-center coordinates must be finite")
+
+    return center
 
 
 def read_config_tables(config_dir=None):

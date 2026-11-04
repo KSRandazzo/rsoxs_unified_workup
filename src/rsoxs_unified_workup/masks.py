@@ -2,6 +2,8 @@ import numpy as np
 from skimage.draw import polygon2mask
 import xarray as xr
 from copy import deepcopy
+from rsoxs_unified_workup.config import get_beam_center
+from uuid import uuid4
 
 
 def rotated_rectangle(
@@ -209,15 +211,17 @@ def build_saturation_masks(scans):
 def build_center_masks(
     saturation_masks,
     beamstop_vertices,
-    settings,
+    processing,
 ):
-    """Build circular center masks for every energy."""
-    center_x = float(settings["beam_center_x_guess"])
-    center_y = float(settings["beam_center_y_guess"])
+    """Build circular center masks using the configured beam center."""
+    settings = processing["center_mask"]
+    center = get_beam_center(processing)
+    center_x = center["x"]
+    center_y = center["y"]
+
     search_width = float(
         settings["saturation_search_width"]
     )
-
     energy_dimension = saturation_masks.energy.dims[0]
     detector_height = saturation_masks.sizes["pix_y"]
     detector_width = saturation_masks.sizes["pix_x"]
@@ -347,6 +351,7 @@ def build_center_masks(
         data=center_mask_values
     )
     center_masks.name = "center_mask"
+    center_masks.attrs["beam_center"] = deepcopy(center)
     center_masks.attrs["center_mask_settings"] = deepcopy(settings)
     center_masks.attrs["center_mask_summaries"] = deepcopy(summaries)
 
@@ -365,6 +370,7 @@ def build_final_masks(
         )
 
     metadata_keys = (
+        "beam_center",
         "center_mask_settings",
         "center_mask_summaries",
     )
@@ -393,6 +399,7 @@ def build_final_masks(
                 center_masks.attrs[key]
             )
 
+        final_mask.attrs["mask_id"] = uuid4().hex
         final_masks[polarization] = final_mask
 
     return final_masks
@@ -409,6 +416,7 @@ def apply_final_masks(scans, final_masks):
 
         final_mask = final_masks[polarization]
 
+        scan_data.pop("beam_center_approval", None)
         scan_data["final_mask"] = final_mask
         scan_data["masked_data_final"] = (
             scan_data["data"].where(~final_mask)
