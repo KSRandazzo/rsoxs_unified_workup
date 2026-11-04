@@ -339,73 +339,103 @@ def aggregate_anisotropy(anisotropy_results):
     }
 
 
-def build_pointwise_anisotropy_maps(
-    anisotropy_results,
-):
-    """Build stitched chi-resolved maps for each scan pair."""
-    all_results = {}
+def build_pointwise_anisotropy_maps(configuration, scans):
+    """Build stitched pointwise maps from uncapped normalization."""
+    pairs_by_id = {
+        pair["pair_id"]: pair
+        for pair in configuration["polarization_pairs"]
+    }
+    sectors_by_pair = {}
 
-    for mode, sector_results in (
-        anisotropy_results.items()
-    ):
-        sectors_by_pair = {}
+    for sector in configuration["anisotropy_sectors"]:
+        sectors_by_pair.setdefault(
+            sector["pair_id"], []
+        ).append(sector)
 
-        for sector in sector_results.values():
-            pair_id = sector["pair_id"]
-            sectors_by_pair.setdefault(
-                pair_id,
-                [],
-            ).append(sector)
+    all_results = {
+        mode: {}
+        for mode in NORMALIZATION_MODES
+    }
 
-        mode_results = {}
+    def sector_patch(polarization, normalization_key, sector):
+        uncapped = scans[polarization].get(
+            "normalization", {}
+        ).get("uncapped_q")
 
-        for pair_id, sectors in sectors_by_pair.items():
-            sectors = sorted(
-                sectors,
-                key=lambda sector: float(
-                    sector["chi_center_deg"]
-                ),
+        if uncapped is None:
+            raise ValueError(
+                "Uncapped normalization is missing. "
+                "Rerun normalization for every scan first."
             )
 
-            parallel_patches = [
-                sector["parallel_slice"].transpose(
-                    "energy",
-                    "chi",
-                    "q",
+        return select_chi_region(
+            uncapped[normalization_key],
+            center_degrees=sector["chi_center_deg"],
+            halfwidth_degrees=sector["chi_halfwidth_deg"],
+        ).transpose("energy", "chi", "q")
+
+    for pair_id, sectors in sectors_by_pair.items():
+        if pair_id not in pairs_by_id:
+            raise ValueError(
+                f"Unknown polarization pair {pair_id!r}"
+            )
+
+        polarization_1, polarization_2 = pair_polarizations(
+            configuration,
+            pairs_by_id[pair_id],
+        )
+        sectors = sorted(
+            sectors,
+            key=lambda sector: float(sector["chi_center_deg"]),
+        )
+
+        for mode, normalization_key in NORMALIZATION_MODES.items():
+            parallel_patches = []
+            perpendicular_patches = []
+
+            for sector in sectors:
+                parallel_pol, perpendicular_pol = (
+                    assign_parallel_perpendicular(
+                        sector["chi_center_deg"],
+                        polarization_1,
+                        polarization_2,
+                    )
                 )
-                for sector in sectors
-            ]
-            perpendicular_patches = [
-                sector["perpendicular_slice"].transpose(
-                    "energy",
-                    "chi",
-                    "q",
+                parallel_patches.append(
+                    sector_patch(
+                        parallel_pol,
+                        normalization_key,
+                        sector,
+                    )
                 )
-                for sector in sectors
-            ]
+                perpendicular_patches.append(
+                    sector_patch(
+                        perpendicular_pol,
+                        normalization_key,
+                        sector,
+                    )
+                )
 
             parallel = xr.concat(
                 parallel_patches,
                 dim="chi",
+                join="exact",
             ).sortby("chi")
             perpendicular = xr.concat(
                 perpendicular_patches,
                 dim="chi",
+                join="exact",
             ).sortby("chi")
 
-            if not np.array_equal(
-                parallel["chi"].values,
-                perpendicular["chi"].values,
-            ):
-                raise ValueError(
-                    f"Parallel and perpendicular chi "
-                    f"coordinates differ for pair {pair_id!r}"
-                )
+            parallel, perpendicular = xr.align(
+                parallel,
+                perpendicular,
+                join="exact",
+                copy=False,
+            )
 
             chi_values = parallel["chi"].values
-            unique_chi = np.unique(chi_values)
-
-            if len(unique_chi) != len(chi_values):
+            if len(np.unique(chi_values)) != len(chi_values):
                 raise ValueError(
                     f"Overlapping sectors produced duplicate "
                     f"chi coordinates for pair {pair_id!r}"
@@ -414,20 +444,27 @@ def build_pointwise_anisotropy_maps(
             difference = parallel - perpendicular
             denominator = parallel + perpendicular
             pointwise_anisotropy = (
-                difference
-                / denominator.where(denominator != 0)
+                difference / denominator.where(denominator != 0)
             )
 
             parallel.name = "parallel_intensity"
-            perpendicular.name = (
-                "perpendicular_intensity"
-            )
+            perpendicular.name = "perpendicular_intensity"
             difference.name = "intensity_difference"
-            pointwise_anisotropy.name = (
-                "pointwise_anisotropy"
-            )
+            pointwise_anisotropy.name = "pointwise_anisotropy"
 
-            mode_results[pair_id] = {
+            for array in (
+                parallel,
+                perpendicular,
+                difference,
+                pointwise_anisotropy,
+            ):
+                array.attrs = {
+                    **array.attrs,
+                    "source_product": "clean_uncapped_q",
+                    "q_cap_applied": False,
+                }
+
+            all_results[mode][pair_id] = {
                 "parallel": parallel,
                 "perpendicular": perpendicular,
                 "difference": difference,
@@ -437,7 +474,5 @@ def build_pointwise_anisotropy_maps(
                     for sector in sectors
                 ],
             }
-
-        all_results[mode] = mode_results
 
     return all_results

@@ -44,43 +44,38 @@ def select_chi_region(
 
 
 def normalize_scan(scan_record, processing):
-    """Normalize the integrated intensity stored inside one scan record."""
+    """Return capped and uncapped chi-normalization products for one scan."""
     settings = processing["normalization"]
-    clean = scan_record["integration"]["clean"]
-    half_ring = select_chi_region(
-        clean,
-        center_degrees=settings[
-            "half_ring_center_degrees"
-        ],
-        halfwidth_degrees=settings[
-            "half_ring_halfwidth_degrees"
-        ],
-    )
+    integration = scan_record["integration"]
 
-    full_ring_mean = clean.mean(
-        "chi",
-        skipna=True,
-    )
-    half_ring_mean = half_ring.mean(
-        "chi",
-        skipna=True,
-    )
+    def normalize_intensity(data):
+        half_ring = select_chi_region(
+            data,
+            center_degrees=settings["half_ring_center_degrees"],
+            halfwidth_degrees=settings["half_ring_halfwidth_degrees"],
+        )
 
-    full_denominator = full_ring_mean.where(
-        full_ring_mean != 0
-    )
-    half_denominator = half_ring_mean.where(
-        half_ring_mean != 0
-    )
+        full_ring_mean = data.mean("chi", skipna=True)
+        half_ring_mean = half_ring.mean("chi", skipna=True)
+
+        full_denominator = full_ring_mean.where(
+            full_ring_mean != 0
+        )
+        half_denominator = half_ring_mean.where(
+            half_ring_mean != 0
+        )
+
+        return {
+            "full_ring_mean": full_ring_mean,
+            "half_ring_mean": half_ring_mean,
+            "full_ring_normalized": data / full_denominator,
+            "half_ring_normalized": data / half_denominator,
+        }
 
     return {
-        "full_ring_mean": full_ring_mean,
-        "half_ring_mean": half_ring_mean,
-        "full_ring_normalized": (
-            clean / full_denominator
-        ),
-        "half_ring_normalized": (
-            clean / half_denominator
+        **normalize_intensity(integration["clean"]),
+        "uncapped_q": normalize_intensity(
+            integration["clean_uncapped_q"]
         ),
         "half_ring_center_degrees": float(
             settings["half_ring_center_degrees"]
