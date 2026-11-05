@@ -1,6 +1,5 @@
 [darks]
 upper_percentile = 99.98
-union_across_polarizations = true
 
 [beamstop]
 center_x = 743

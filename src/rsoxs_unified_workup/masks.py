@@ -106,57 +106,109 @@ def create_border_mask(detector_shape, settings):
     return mask
 
 
+def _validate_mask_pairs(polarizations, mask_pairs):
+    """Require one complete perpendicular pair per polarization."""
+    available = set(polarizations)
+    assigned = set()
+
+    if not mask_pairs:
+        raise ValueError("No mask pairs were supplied")
+
+    for pair_id, pair in mask_pairs.items():
+        if len(pair) != 2 or pair[0] == pair[1]:
+            raise ValueError(
+                f"Mask pair {pair_id!r} must contain two polarizations"
+            )
+
+        members = set(pair)
+        missing = members - available
+        overlap = members & assigned
+
+        if missing:
+            raise ValueError(
+                f"Mask pair {pair_id!r} has unavailable polarizations: "
+                f"{sorted(missing)}"
+            )
+        if overlap:
+            raise ValueError(
+                f"Polarizations {sorted(overlap)} belong to multiple pairs"
+            )
+
+        separation = abs(
+            ((float(pair[0]) - float(pair[1]) + 90) % 180) - 90
+        )
+        if abs(separation - 90) > 1e-6:
+            raise ValueError(f"Mask pair {pair_id!r} is not perpendicular")
+
+        assigned.update(members)
+
+    if assigned != available:
+        raise ValueError(
+            f"Polarizations without a mask pair: {sorted(available - assigned)}"
+        )
+
+
 def combine_static_masks(
     dark_masks,
     beamstop_mask,
     border_mask,
-    union_across_polarizations=True,
+    mask_pairs,
 ):
-    """Combine dark, beamstop, and detector-border masks."""
+    """Combine dark masks within pairs, plus shared geometric masks."""
     if not dark_masks:
         raise ValueError("No dark masks were supplied")
 
+    _validate_mask_pairs(dark_masks, mask_pairs)
     expected_shape = beamstop_mask.shape
 
+    if beamstop_mask.ndim != 2:
+        raise ValueError("The beamstop mask must be two-dimensional")
     if border_mask.shape != expected_shape:
         raise ValueError(
             "Beamstop and border masks have different shapes"
         )
 
+    ordered_dark_masks = {}
     for polarization, dark_mask in dark_masks.items():
-        if dark_mask.shape != expected_shape:
+        ordered = dark_mask.transpose("pix_y", "pix_x")
+
+        if ordered.shape != expected_shape:
             raise ValueError(
                 f"Dark mask for polarization {polarization}° "
-                f"has shape {dark_mask.shape}; "
-                f"expected {expected_shape}"
+                f"has shape {ordered.shape}; expected {expected_shape}"
             )
+        if ordered.dtype.kind != "b":
+            raise ValueError("Dark masks must contain boolean values")
 
-    if union_across_polarizations:
-        shared_dark_mask = np.any(
-            [
-                dark_mask.values
-                for dark_mask in dark_masks.values()
-            ],
-            axis=0,
-        )
+        ordered_dark_masks[polarization] = ordered
 
     static_masks = {}
 
-    for polarization, dark_mask in dark_masks.items():
-        if union_across_polarizations:
-            dark_values = shared_dark_mask
-        else:
-            dark_values = dark_mask.values
+    for pair_id, polarizations in mask_pairs.items():
+        pol_1, pol_2 = polarizations
+        first, second = xr.align(
+            ordered_dark_masks[pol_1],
+            ordered_dark_masks[pol_2],
+            join="exact",
+            copy=False,
+        )
 
         combined_values = (
-            dark_values
+            first.values
+            | second.values
             | beamstop_mask
             | border_mask
         )
 
-        static_masks[polarization] = dark_mask.copy(
-            data=combined_values
-        )
+        for polarization in polarizations:
+            mask = ordered_dark_masks[polarization].copy(
+                data=combined_values.copy()
+            )
+            mask.name = "static_mask"
+            mask.attrs["mask_pair_id"] = pair_id
+            mask.attrs["mask_pair_polarizations"] = list(polarizations)
+            mask.attrs["mask_union_scope"] = "polarization_pair"
+            static_masks[polarization] = mask
 
     return static_masks
 
@@ -180,35 +232,87 @@ def apply_static_masks(scans, static_masks):
     return scans
 
 
-def build_saturation_masks(scans):
-    """Union negative saturated pixels across polarizations."""
-    first_scan = next(iter(scans.values()))
-    reference = first_scan["masked_data_static"]
-    reference_energies = reference.energy.values
+def _on_reference_detector_grid(data, reference, label):
+    """Validate a detector grid; only reorder dimensions, never interpolate."""
+    ordered = data.transpose(*reference.dims)
 
-    combined = xr.zeros_like(reference, dtype=bool)
+    if ordered.shape != reference.shape:
+        raise ValueError(
+            f"{label} has shape {ordered.shape}; "
+            f"expected {reference.shape}"
+        )
 
-    for polarization, scan_data in scans.items():
-        masked_data = scan_data["masked_data_static"]
-
+    for coordinate in ("energy", "pix_y", "pix_x"):
         if not np.array_equal(
-            masked_data.energy.values,
-            reference_energies,
+            ordered[coordinate].values,
+            reference[coordinate].values,
         ):
             raise ValueError(
-                f"Energy values for polarization "
-                f"{polarization}° do not match the scan set"
+                f"{label} has different {coordinate} coordinates"
             )
 
-        saturated = (masked_data < 0).fillna(False)
-        combined = combined | saturated
-
-    combined.name = "saturation_mask"
-
-    return combined
+    return ordered
 
 
-def build_center_masks(
+def build_saturation_masks(scans, mask_pairs):
+    """Union negative saturated pixels within each pair, at each energy."""
+    _validate_mask_pairs(scans, mask_pairs)
+    saturation_masks = {}
+
+    for pair_id, polarizations in mask_pairs.items():
+        pol_1, pol_2 = polarizations
+        reference = scans[pol_1]["masked_data_static"]
+        energy_dimension = reference.energy.dims[0]
+        reference = reference.transpose(
+            energy_dimension, "pix_y", "pix_x"
+        )
+        combined_values = np.zeros(reference.shape, dtype=bool)
+        pair_data = {}
+
+        for polarization in polarizations:
+            scan_record = scans[polarization]
+            static_mask = scan_record.get("static_mask")
+            if (
+                static_mask is None
+                or static_mask.attrs.get("mask_pair_id") != pair_id
+                or set(
+                    static_mask.attrs.get("mask_pair_polarizations", [])
+                ) != set(polarizations)
+                or static_mask.attrs.get("mask_union_scope")
+                != "polarization_pair"
+            ):
+                raise ValueError(
+                    f"Scan {scan_record['scan_id']} has no current "
+                    f"static mask for pair {pair_id!r}. "
+                    "Rebuild and apply the pairwise static masks first."
+                )
+
+            ordered = _on_reference_detector_grid(
+                scan_record["masked_data_static"],
+                reference,
+                f"Scan {scan_record['scan_id']}",
+            )
+            pair_data[polarization] = ordered
+
+            # NaN values compare False; keep the existing < 0 criterion.
+            combined_values |= ordered.values < 0
+
+        for polarization in polarizations:
+            mask = pair_data[polarization].copy(
+                data=combined_values.copy()
+            )
+            mask.name = "saturation_mask"
+            mask.attrs = {
+                "mask_pair_id": pair_id,
+                "mask_pair_polarizations": list(polarizations),
+                "mask_union_scope": "polarization_pair",
+            }
+            saturation_masks[polarization] = mask
+
+    return saturation_masks
+
+
+def _build_center_mask_for_pair(
     saturation_masks,
     beamstop_vertices,
     processing,
@@ -358,49 +462,195 @@ def build_center_masks(
     return center_masks, summaries
 
 
+def build_center_masks(
+    saturation_masks,
+    beamstop_vertices,
+    processing,
+    mask_pairs,
+):
+    """Build one center mask per pair and energy, using a shared center."""
+    _validate_mask_pairs(saturation_masks, mask_pairs)
+    center_masks = {}
+    center_mask_summaries = {}
+
+    for pair_id, polarizations in mask_pairs.items():
+        pol_1, pol_2 = polarizations
+        reference = saturation_masks[pol_1]
+        energy_dimension = reference.energy.dims[0]
+        reference = reference.transpose(
+            energy_dimension, "pix_y", "pix_x"
+        )
+        pair_masks = {}
+
+        for polarization in polarizations:
+            mask = saturation_masks[polarization]
+
+            if (
+                mask.attrs.get("mask_pair_id") != pair_id
+                or set(
+                    mask.attrs.get("mask_pair_polarizations", [])
+                ) != set(polarizations)
+                or mask.attrs.get("mask_union_scope")
+                != "polarization_pair"
+            ):
+                raise ValueError(
+                    f"Polarization {polarization}° has no current "
+                    f"saturation mask for pair {pair_id!r}"
+                )
+
+            ordered = _on_reference_detector_grid(
+                mask,
+                reference,
+                f"Saturation mask for polarization {polarization}°",
+            )
+            if ordered.dtype.kind != "b":
+                raise ValueError("Saturation masks must be boolean")
+
+            pair_masks[polarization] = ordered
+
+        if not np.array_equal(
+            pair_masks[pol_1].values,
+            pair_masks[pol_2].values,
+        ):
+            raise ValueError(
+                f"Saturation masks differ within pair {pair_id!r}. "
+                "Rebuild the pairwise saturation masks first."
+            )
+
+        pair_center_mask, summaries = _build_center_mask_for_pair(
+            saturation_masks=reference,
+            beamstop_vertices=beamstop_vertices,
+            processing=processing,
+        )
+
+        for polarization in polarizations:
+            mask = pair_masks[polarization].copy(
+                data=pair_center_mask.values.copy()
+            )
+            mask.name = "center_mask"
+            mask.attrs = deepcopy(pair_center_mask.attrs)
+
+            center_masks[polarization] = mask
+            center_mask_summaries[polarization] = deepcopy(summaries)
+
+    return center_masks, center_mask_summaries
+
+
 def build_final_masks(
     static_masks,
     saturation_masks,
     center_masks,
+    mask_pairs,
 ):
-    """Combine masks and preserve the center-mask settings."""
-    if saturation_masks.shape != center_masks.shape:
-        raise ValueError(
-            "Saturation and center masks have different shapes"
-        )
+    """Combine each scan's pairwise masks without coordinate alignment."""
+    _validate_mask_pairs(static_masks, mask_pairs)
 
-    metadata_keys = (
+    if (
+        set(static_masks) != set(saturation_masks)
+        or set(static_masks) != set(center_masks)
+    ):
+        raise ValueError("Static, saturation, and center-mask keys must match")
+
+    center_metadata = (
         "beam_center",
         "center_mask_settings",
         "center_mask_summaries",
     )
-    for key in metadata_keys:
-        if key not in center_masks.attrs:
-            raise ValueError(
-                "Center-mask metadata is missing. "
-                "Rerun center-mask construction first."
-            )
-
+    pair_metadata = (
+        "mask_pair_id",
+        "mask_pair_polarizations",
+        "mask_union_scope",
+    )
     final_masks = {}
 
-    for polarization, static_mask in static_masks.items():
-        final_mask = (
-            static_mask
-            | saturation_masks
-            | center_masks
-        )
-        final_mask = final_mask.transpose(
-            *saturation_masks.dims
-        )
-        final_mask.name = "final_mask"
-
-        for key in metadata_keys:
-            final_mask.attrs[key] = deepcopy(
-                center_masks.attrs[key]
+    for pair_id, polarizations in mask_pairs.items():
+        for polarization in polarizations:
+            saturation = saturation_masks[polarization]
+            energy_dimension = saturation.energy.dims[0]
+            saturation = saturation.transpose(
+                energy_dimension, "pix_y", "pix_x"
             )
 
-        final_mask.attrs["mask_id"] = uuid4().hex
-        final_masks[polarization] = final_mask
+            center = _on_reference_detector_grid(
+                center_masks[polarization],
+                saturation,
+                f"Center mask for polarization {polarization}°",
+            )
+            static = static_masks[polarization].transpose(
+                "pix_y", "pix_x"
+            )
+
+            if static.shape != saturation.shape[-2:]:
+                raise ValueError("Static mask does not match detector shape")
+
+            for coordinate in ("pix_y", "pix_x"):
+                if not np.array_equal(
+                    static[coordinate].values,
+                    saturation[coordinate].values,
+                ):
+                    raise ValueError(
+                        f"Polarization {polarization}°: "
+                        f"static-mask {coordinate} coordinates differ"
+                    )
+
+            for mask in (static, saturation, center):
+                if mask.dtype.kind != "b":
+                    raise ValueError("All detector masks must be boolean")
+
+                if (
+                    mask.attrs.get("mask_pair_id") != pair_id
+                    or set(
+                        mask.attrs.get("mask_pair_polarizations", [])
+                    ) != set(polarizations)
+                    or mask.attrs.get("mask_union_scope")
+                    != "polarization_pair"
+                ):
+                    raise ValueError(
+                        f"Polarization {polarization}° has a mask "
+                        f"that does not belong to pair {pair_id!r}"
+                    )
+
+            for key in center_metadata:
+                if key not in center.attrs:
+                    raise ValueError(
+                        f"Center-mask metadata {key!r} is missing. "
+                        "Rebuild the center masks first."
+                    )
+
+            combined_values = (
+                static.values[np.newaxis, :, :]
+                | saturation.values
+                | center.values
+            )
+            final_mask = saturation.copy(data=combined_values)
+            final_mask.name = "final_mask"
+            final_mask.attrs = {
+                key: deepcopy(center.attrs[key])
+                for key in center_metadata + pair_metadata
+            }
+            final_mask.attrs["mask_id"] = uuid4().hex
+            final_masks[polarization] = final_mask
+
+        pol_1, pol_2 = polarizations
+        first = final_masks[pol_1]
+        second = _on_reference_detector_grid(
+            final_masks[pol_2],
+            first,
+            f"Final mask for polarization {pol_2}°",
+        )
+
+        if not np.array_equal(first.values, second.values):
+            raise ValueError(
+                f"Final masks differ within pair {pair_id!r}. "
+                "Rebuild that pair's component masks first."
+            )
+
+        for key in center_metadata:
+            if first.attrs[key] != second.attrs[key]:
+                raise ValueError(
+                    f"Center-mask metadata {key!r} differs "
+                    f"within pair {pair_id!r}"
+                )
 
     return final_masks
 

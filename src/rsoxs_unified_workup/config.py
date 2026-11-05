@@ -145,3 +145,83 @@ def load_scan_set(scan_set_id, config_dir=None):
             orient="records"
         ),
     }
+
+
+def get_mask_pairs(configuration):
+    """Return non-overlapping perpendicular pairs for mask sharing."""
+    scan_records = configuration["scans"]
+    if not scan_records:
+        raise ValueError("No scans were supplied for mask pairing")
+
+    polarization_by_scan_id = {}
+    for scan_record in scan_records:
+        scan_id = int(scan_record["scan_id"])
+        polarization = float(scan_record["polarization_deg"])
+
+        if scan_id in polarization_by_scan_id:
+            raise ValueError(f"Duplicate scan ID: {scan_id}")
+        if not isfinite(polarization):
+            raise ValueError(
+                f"Scan {scan_id} has a nonfinite polarization"
+            )
+
+        if polarization.is_integer():
+            polarization = int(polarization)
+
+        polarization_by_scan_id[scan_id] = polarization
+
+    if len(set(polarization_by_scan_id.values())) != len(scan_records):
+        raise ValueError(
+            "Mask pairing requires distinct polarizations in the scan set"
+        )
+
+    mask_pairs = {}
+    used_scan_ids = set()
+
+    for pair in configuration["polarization_pairs"]:
+        pair_id = pair["pair_id"]
+        scan_ids = (
+            int(pair["scan_id_1"]),
+            int(pair["scan_id_2"]),
+        )
+
+        if pair_id in mask_pairs:
+            raise ValueError(f"Duplicate polarization pair ID: {pair_id}")
+        if scan_ids[0] == scan_ids[1]:
+            raise ValueError(f"Pair {pair_id!r} refers to the same scan twice")
+
+        missing = set(scan_ids) - set(polarization_by_scan_id)
+        if missing:
+            raise ValueError(
+                f"Pair {pair_id!r} refers to scans outside this scan set: "
+                f"{sorted(missing)}"
+            )
+
+        overlap = set(scan_ids) & used_scan_ids
+        if overlap:
+            raise ValueError(
+                f"Scans {sorted(overlap)} belong to more than one pair. "
+                "Pairwise masks require one pair per scan."
+            )
+
+        pol_1, pol_2 = (
+            polarization_by_scan_id[scan_id]
+            for scan_id in scan_ids
+        )
+        separation = abs(((pol_1 - pol_2 + 90) % 180) - 90)
+        if abs(separation - 90) > 1e-6:
+            raise ValueError(
+                f"Pair {pair_id!r} is separated by "
+                f"{separation:g}°, not 90°"
+            )
+
+        mask_pairs[pair_id] = (pol_1, pol_2)
+        used_scan_ids.update(scan_ids)
+
+    unpaired = set(polarization_by_scan_id) - used_scan_ids
+    if unpaired:
+        raise ValueError(
+            f"Scans without a polarization pair: {sorted(unpaired)}"
+        )
+
+    return mask_pairs

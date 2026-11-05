@@ -358,86 +358,115 @@ def plot_saturation_overlays(
     vmax=1e6,
     cmap="jet",
 ):
-    """Overlay unioned saturated pixels on selected scan frames."""
-    row_count = len(scans)
-    energy_dimension = saturation_masks.energy.dims[0]
+    """Overlay each scan's pairwise saturation mask at review energies."""
+    if not scans or set(scans) != set(saturation_masks):
+        raise ValueError("Scans and saturation masks must have matching keys")
 
-    energy_indices = review_energy_indices(
-        scan_record=next(iter(scans.values())),
-        processing=processing,
-        energy_values=saturation_masks.energy.values,
-    )
-    energy_count = len(energy_indices)
-    fig, axes = plt.subplots(
-        row_count,
-        energy_count,
-        figsize=(7 * energy_count, 5 * row_count),
-        constrained_layout=True,
-    )
-    axes = np.asarray(axes, dtype=object).reshape(
-        row_count,
-        energy_count,
-    )
+    rows = []
 
-    for row, (polarization, scan_data) in enumerate(
-        scans.items()
-    ):
-        masked_data = scan_data["masked_data_static"]
-        frame_dimension = masked_data.energy.dims[0]
+    for polarization, scan_data in scans.items():
+        mask = saturation_masks[polarization]
+        energy_dimension = mask.energy.dims[0]
+        mask = mask.transpose(energy_dimension, "pix_y", "pix_x")
 
-        for column, index in enumerate(energy_indices):
-            axis = axes[row, column]
-            frame = masked_data.isel(
-                {frame_dimension: index}
-            ).values
-            saturation_mask = saturation_masks.isel(
-                {energy_dimension: index}
-            ).values
-            y_positions, x_positions = np.where(
-                saturation_mask
+        data = scan_data["masked_data_static"]
+        frame_dimension = data.energy.dims[0]
+        data = data.transpose(frame_dimension, "pix_y", "pix_x")
+
+        if data.shape != mask.shape:
+            raise ValueError(
+                f"Scan {scan_data['scan_id']}: data and mask shapes differ"
             )
 
-            image = axis.imshow(
-                frame,
-                norm=LogNorm(vmin=vmin, vmax=vmax),
-                cmap=cmap,
-                origin="lower",
-            )
-            axis.scatter(
-                x_positions,
-                y_positions,
-                color="white",
-                s=1,
-            )
-            axis.set_title(
-                f"{scan_data['sample_name']}: "
-                f"Scan {scan_data['scan_id']}, "
-                f"polarization={polarization}°\n"
-                f"Energy="
-                f"{masked_data.energy.values[index]:g} eV; "
-                f"{len(x_positions):,} saturated pixels"
-            )
-            axis.set_xlabel("Pixel x")
-            axis.set_ylabel("Pixel y")
-            axis.set_aspect("equal")
+        for coordinate in ("energy", "pix_y", "pix_x"):
+            if not np.array_equal(
+                data[coordinate].values,
+                mask[coordinate].values,
+            ):
+                raise ValueError(
+                    f"Scan {scan_data['scan_id']}: "
+                    f"data and mask {coordinate} coordinates differ"
+                )
 
-    fig.colorbar(
-        image,
-        ax=axes,
-        shrink=0.5,
-        label="Intensity",
-    )
+        indices = review_energy_indices(
+            scan_record=scan_data,
+            processing=processing,
+            energy_values=data.energy.values,
+        )
+        rows.append((polarization, scan_data, data, mask, indices))
 
-    first_scan = next(iter(scans.values()))
-    fig.suptitle(
-        f"Saturation-mask review\n"
-        f"{first_scan['sample_name']}: "
-        f"{first_scan['base_description']}",
-        fontsize=16,
-    )
+    row_count = len(rows)
+    column_count = max(len(row[4]) for row in rows)
 
-    plt.show()
-    plt.close(fig)
+    with plt.style.context("dark_background"):
+        fig, axes = plt.subplots(
+            row_count,
+            column_count,
+            figsize=(7 * column_count, 5 * row_count),
+            constrained_layout=True,
+            squeeze=False,
+        )
+        active_axes = []
+
+        for row, (polarization, scan_data, data, mask, indices) in enumerate(rows):
+            frame_dimension = data.energy.dims[0]
+            energy_dimension = mask.energy.dims[0]
+            pair = mask.attrs["mask_pair_polarizations"]
+            pair_label = "/".join(f"{value:g}°" for value in pair)
+
+            for column, index in enumerate(indices):
+                axis = axes[row, column]
+                frame = data.isel({frame_dimension: index}).values
+                saturation = mask.isel({energy_dimension: index}).values
+                y_positions, x_positions = np.where(saturation)
+
+                image = axis.imshow(
+                    frame,
+                    norm=LogNorm(vmin=vmin, vmax=vmax),
+                    cmap=cmap,
+                    origin="lower",
+                )
+                axis.scatter(
+                    x_positions,
+                    y_positions,
+                    color="white",
+                    s=1,
+                    label="Pairwise saturated pixels",
+                )
+                axis.set_title(
+                    f"{scan_data['sample_name']}: "
+                    f"Scan {scan_data['scan_id']}, "
+                    f"polarization={polarization}°\n"
+                    f"Pair={pair_label}; "
+                    f"Energy={data.energy.values[index]:g} eV; "
+                    f"{len(x_positions):,} saturated pixels"
+                )
+                axis.set_xlabel("Pixel x")
+                axis.set_ylabel("Pixel y")
+                axis.set_aspect("equal")
+                axis.legend(loc="upper right", fontsize=8)
+                active_axes.append(axis)
+
+            for column in range(len(indices), column_count):
+                axes[row, column].set_visible(False)
+
+        fig.colorbar(
+            image,
+            ax=active_axes,
+            shrink=0.5,
+            label="Intensity",
+        )
+
+        first_scan = next(iter(scans.values()))
+        fig.suptitle(
+            f"Pairwise saturation-mask review\n"
+            f"{first_scan['sample_name']}: "
+            f"{first_scan['base_description']}",
+            fontsize=16,
+        )
+
+        plt.show()
+        plt.close(fig)
 
 
 def plot_center_mask_review(
@@ -447,101 +476,143 @@ def plot_center_mask_review(
     summaries,
     processing,
 ):
-    """Review center-mask radius selection at selected energies."""
-    center = center_masks.attrs["beam_center"]
-    energy_dimension = saturation_masks.energy.dims[0]
+    """Review center-mask radius selection once per polarization pair."""
+    if (
+        not scans
+        or set(scans) != set(saturation_masks)
+        or set(scans) != set(center_masks)
+        or set(scans) != set(summaries)
+    ):
+        raise ValueError("Scans, masks, and summaries must have matching keys")
 
-    energy_indices = review_energy_indices(
-        scan_record=next(iter(scans.values())),
-        processing=processing,
-        energy_values=saturation_masks.energy.values,
-    )
-    energy_count = len(energy_indices)
+    reviewed_pairs = set()
 
-    fig, axes = plt.subplots(
-        energy_count,
-        2,
-        figsize=(12, 5 * energy_count),
-        constrained_layout=True,
-    )
-    axes = np.asarray(axes, dtype=object).reshape(
-        energy_count,
-        2,
-    )
+    for polarization, scan_record in scans.items():
+        center_mask = center_masks[polarization]
+        pair_id = center_mask.attrs["mask_pair_id"]
 
-    center_x = center["x"]
-    center_y = center["y"]
+        if pair_id in reviewed_pairs:
+            continue
+        reviewed_pairs.add(pair_id)
 
-    for index, energy_index in enumerate(energy_indices):
-        summary = summaries[energy_index]
-
-        saturation = saturation_masks.isel(
-            {energy_dimension: energy_index}
-        ).values
-        center_mask = center_masks.isel(
-            {energy_dimension: energy_index}
-        ).values
-
-        x_min, x_max, y_min, y_max = summary[
-            "search_bounds"
-        ]
-
-        axes[index, 0].imshow(
-            saturation,
-            origin="lower",
-            cmap="gray",
+        pair = center_mask.attrs["mask_pair_polarizations"]
+        pair_label = "/".join(f"{value:g}°" for value in pair)
+        scan_label = ", ".join(
+            str(scans[value]["scan_id"]) for value in pair
         )
-        axes[index, 0].scatter(
-            summary["farthest_x"],
-            summary["farthest_y"],
-            color="gold",
-            s=80,
-            label="Radius point",
-        )
-        axes[index, 0].scatter(
-            center_x,
-            center_y,
-            color="red",
-            s=80,
-            label="Beam-center guess",
-        )
-        axes[index, 0].set_title(
-            f"Energy={summary['energy']:g} eV\n"
-            f"Radius={summary['radius']:.2f} pixels "
-            f"from {summary['radius_source']}"
-        )
-        axes[index, 0].legend()
 
-        axes[index, 1].imshow(
-            center_mask,
-            origin="lower",
-            cmap="gray",
+        energy_dimension = center_mask.energy.dims[0]
+        center_mask = center_mask.transpose(
+            energy_dimension, "pix_y", "pix_x"
         )
-        axes[index, 1].scatter(
-            center_x,
-            center_y,
-            color="red",
-            s=80,
+        saturation_mask = saturation_masks[polarization].transpose(
+            *center_mask.dims
         )
-        axes[index, 1].set_title("Resulting center mask")
 
-        for axis in axes[index]:
-            axis.set_xlim(x_min, x_max)
-            axis.set_ylim(y_min, y_max)
-            axis.set_xlabel("Pixel x")
-            axis.set_ylabel("Pixel y")
-            axis.set_aspect("equal")
+        if saturation_mask.shape != center_mask.shape:
+            raise ValueError("Saturation and center-mask shapes differ")
 
-    first_scan = next(iter(scans.values()))
-    fig.suptitle(
-        f"Center-mask review\n"
-        f"{first_scan['sample_name']}: "
-        f"{first_scan['base_description']}",
-        fontsize=16,
-    )
+        for coordinate in ("energy", "pix_y", "pix_x"):
+            if not np.array_equal(
+                saturation_mask[coordinate].values,
+                center_mask[coordinate].values,
+            ):
+                raise ValueError(
+                    f"Pair {pair_id!r}: mask {coordinate} coordinates differ"
+                )
 
-    plt.show()
-    plt.close(fig)
+        pair_summaries = summaries[polarization]
+        if len(pair_summaries) != center_mask.sizes[energy_dimension]:
+            raise ValueError("Center-mask summary count does not match energies")
+
+        center = center_mask.attrs["beam_center"]
+        center_x = center["x"]
+        center_y = center["y"]
+
+        energy_indices = review_energy_indices(
+            scan_record=scan_record,
+            processing=processing,
+            energy_values=center_mask.energy.values,
+        )
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                len(energy_indices),
+                2,
+                figsize=(12, 5 * len(energy_indices)),
+                constrained_layout=True,
+                squeeze=False,
+            )
+
+            for row, energy_index in enumerate(energy_indices):
+                summary = pair_summaries[energy_index]
+                saturation = saturation_mask.isel(
+                    {energy_dimension: energy_index}
+                ).values
+                center_frame = center_mask.isel(
+                    {energy_dimension: energy_index}
+                ).values
+
+                x_min, x_max, y_min, y_max = summary["search_bounds"]
+
+                axes[row, 0].imshow(
+                    saturation,
+                    origin="lower",
+                    cmap="gray",
+                )
+                axes[row, 0].scatter(
+                    summary["farthest_x"],
+                    summary["farthest_y"],
+                    color="gold",
+                    s=80,
+                    label="Radius point",
+                )
+                axes[row, 0].scatter(
+                    center_x,
+                    center_y,
+                    color="red",
+                    s=80,
+                    label="Configured beam center",
+                )
+                axes[row, 0].set_title(
+                    f"Energy={summary['energy']:g} eV\n"
+                    f"Radius={summary['radius']:.2f} pixels "
+                    f"from {summary['radius_source']}"
+                )
+                axes[row, 0].legend()
+
+                axes[row, 1].imshow(
+                    center_frame,
+                    origin="lower",
+                    cmap="gray",
+                )
+                axes[row, 1].scatter(
+                    center_x,
+                    center_y,
+                    color="red",
+                    s=80,
+                    label="Configured beam center",
+                )
+                axes[row, 1].set_title("Resulting pairwise center mask")
+                axes[row, 1].legend()
+
+                for axis in axes[row]:
+                    axis.set_xlim(x_min, x_max)
+                    axis.set_ylim(y_min, y_max)
+                    axis.set_xlabel("Pixel x")
+                    axis.set_ylabel("Pixel y")
+                    axis.set_aspect("equal")
+
+            fig.suptitle(
+                f"Center-mask review: pair {pair_label}\n"
+                f"Scans {scan_label}\n"
+                f"{scan_record['sample_name']}: "
+                f"{scan_record['base_description']}",
+                fontsize=16,
+            )
+
+            plt.show()
+            plt.close(fig)
 
 
 def plot_final_masked_frames(
