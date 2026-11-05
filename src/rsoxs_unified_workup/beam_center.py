@@ -7,7 +7,11 @@ from tqdm.auto import tqdm
 from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import uuid4
-from rsoxs_unified_workup.config import get_beam_center
+from rsoxs_unified_workup.config import (
+    get_beam_center,
+    get_beam_centers,
+)
+from rsoxs_unified_workup.masks import _validate_mask_pairs
 
 
 def wrap_chi(values):
@@ -552,6 +556,42 @@ def best_grid_point(cost_grid):
     }
 
 
+def _scan_pair_id(scan_record, final_mask):
+    """Read and validate the pair identity carried by a scan's mask."""
+    pair_id = final_mask.attrs.get("mask_pair_id")
+    pair = final_mask.attrs.get("mask_pair_polarizations")
+
+    if (
+        not isinstance(pair_id, str)
+        or not pair_id
+        or not isinstance(pair, (list, tuple))
+        or final_mask.attrs.get("mask_union_scope") != "polarization_pair"
+    ):
+        raise ValueError(
+            "The final mask has no valid polarization-pair metadata. "
+            "Rebuild the pairwise masks before fitting."
+        )
+
+    try:
+        polarization = float(scan_record["polarization_deg"])
+        members = tuple(float(value) for value in pair)
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise ValueError("Invalid polarization-pair metadata") from error
+
+    if (
+        len(members) != 2
+        or not np.all(np.isfinite(members))
+        or not np.isfinite(polarization)
+        or polarization not in members
+    ):
+        raise ValueError(
+            "The scan's polarization does not match its final-mask pair"
+        )
+
+    _validate_mask_pairs(members, {pair_id: members})
+    return pair_id
+
+
 def _fit_history_entry(
     result,
     processing,
@@ -593,6 +633,8 @@ def _fit_history_entry(
         "polarization_deg": float(result["polarization_deg"]),
         "actual_fit_energy": actual_energy,
         "beam_center": mask.attrs["beam_center"],
+        "mask_pair_id": mask.attrs["mask_pair_id"],
+        "mask_pair_polarizations": mask.attrs["mask_pair_polarizations"],
         "mask_id": mask.attrs["mask_id"],
         "fit_settings": processing["beam_center_fit"],
         "center_mask_settings": settings,
@@ -611,7 +653,8 @@ def fit_scan_beam_center(
 ):
     """Fit one polarization using coarse and fine searches."""
     fit_config = processing["beam_center_fit"]
-    center = get_beam_center(processing)
+    pair_id = _scan_pair_id(scan_record, final_mask)
+    center = get_beam_center(processing, pair_id)
 
     if final_mask.attrs.get("beam_center") != center:
         raise ValueError(
@@ -752,45 +795,80 @@ def fit_scan_beam_center(
     }
 
 
-def fit_scan_set_beam_centers(scans, processing):
-    """Store each scan's latest fit and append its pass history."""
+def _validated_scan_pairs(scans, processing, mask_pairs):
+    """Require scan masks to match the configured pairs and centers."""
+    _validate_mask_pairs(scans, mask_pairs)
+    centers = get_beam_centers(processing, mask_pairs)
+
+    for pair_id, pair in mask_pairs.items():
+        for polarization in pair:
+            record = scans[polarization]
+
+            if float(record["polarization_deg"]) != float(polarization):
+                raise ValueError(
+                    "A scan record's polarization does not match its dictionary key"
+                )
+
+            mask = record.get("final_mask")
+            if mask is None:
+                raise ValueError(f"Scan {record['scan_id']} has no final mask")
+
+            if (
+                _scan_pair_id(record, mask) != pair_id
+                or set(mask.attrs["mask_pair_polarizations"]) != set(pair)
+            ):
+                raise ValueError(
+                    f"Scan {record['scan_id']} has a mask from a different pair. "
+                    "Rebuild the pairwise masks."
+                )
+
+            if mask.attrs.get("beam_center") != centers[pair_id]:
+                raise ValueError(
+                    f"The configured center for pair {pair_id!r} has changed. "
+                    "Rebuild the center and final masks before fitting."
+                )
+
+            for key in ("mask_id", "center_mask_settings", "center_mask_summaries"):
+                if key not in mask.attrs:
+                    raise ValueError(
+                        "Center-mask metadata is missing. "
+                        "Rebuild the center and final masks before fitting."
+                    )
+
+            if mask.attrs["center_mask_settings"] != processing["center_mask"]:
+                raise ValueError(
+                    "Center-mask settings have changed. "
+                    "Rebuild the center and final masks before fitting."
+                )
+
+    return centers
+
+
+def fit_scan_set_beam_centers(scans, processing, mask_pairs):
+    """Fit all scans, storing individual fits and pair-specific medians."""
     if not scans:
         raise ValueError("No scans were supplied for beam-center fitting")
 
     processing_snapshot = deepcopy(processing)
+    pairs_snapshot = deepcopy(mask_pairs)
+    _validated_scan_pairs(scans, processing_snapshot, pairs_snapshot)
+
     pass_id = uuid4().hex
     started_at_utc = datetime.now(timezone.utc).isoformat()
     histories = {}
 
     for polarization, scan_record in scans.items():
-        if "final_mask" not in scan_record:
-            raise ValueError(
-                f"Scan {scan_record['scan_id']} has no final mask"
-            )
-
-        mask = scan_record["final_mask"]
-        for key in (
-            "beam_center",
-            "mask_id",
-            "center_mask_settings",
-            "center_mask_summaries",
-        ):
-            if key not in mask.attrs:
-                raise ValueError(
-                    "Center-mask metadata is missing. "
-                    "Rebuild the center and final masks before fitting."
-                )
-
         previous_fit = scan_record.get("beam_center_fit", {})
-        history = previous_fit.get("history", [])
+        if not isinstance(previous_fit, dict):
+            raise ValueError("beam_center_fit must be a dictionary")
 
+        history = previous_fit.get("history", [])
         if not isinstance(history, list):
             raise ValueError("Beam-center history must be a list")
 
         histories[polarization] = deepcopy(history)
 
     pending_results = {}
-
     for polarization, scan_record in scans.items():
         pending_results[polarization] = fit_scan_beam_center(
             scan_record=scan_record,
@@ -799,41 +877,48 @@ def fit_scan_set_beam_centers(scans, processing):
             processing=processing_snapshot,
         )
 
-    median_suggestion = {
-        "x": float(np.median([
-            result["fine_best"]["x"]
-            for result in pending_results.values()
-        ])),
-        "y": float(np.median([
-            result["fine_best"]["y"]
-            for result in pending_results.values()
-        ])),
-    }
+    median_suggestions = {}
+    for pair_id, pair in pairs_snapshot.items():
+        fitted = np.asarray([
+            [
+                pending_results[polarization]["fine_best"]["x"],
+                pending_results[polarization]["fine_best"]["y"],
+            ]
+            for polarization in pair
+        ], dtype=float)
 
-    for polarization, result in pending_results.items():
-        histories[polarization].append(
-            _fit_history_entry(
-                result=result,
-                processing=processing_snapshot,
-                median_suggestion=median_suggestion,
-                pass_id=pass_id,
-                started_at_utc=started_at_utc,
+        if not np.all(np.isfinite(fitted)):
+            raise ValueError(f"Fitted centers for pair {pair_id!r} must be finite")
+
+        median_values = np.median(fitted, axis=0)
+        median_suggestions[pair_id] = {
+            "x": float(median_values[0]),
+            "y": float(median_values[1]),
+        }
+
+        for polarization in pair:
+            result = pending_results[polarization]
+            histories[polarization].append(
+                _fit_history_entry(
+                    result=result,
+                    processing=processing_snapshot,
+                    median_suggestion=median_suggestions[pair_id],
+                    pass_id=pass_id,
+                    started_at_utc=started_at_utc,
+                )
             )
-        )
-        result["history"] = histories[polarization]
+            result["history"] = histories[polarization]
 
     # Update scan records only after the whole pass succeeds.
     for polarization, result in pending_results.items():
         scans[polarization].pop("beam_center_approval", None)
         scans[polarization]["beam_center_fit"] = result
 
-    return median_suggestion
+    return median_suggestions
 
 
 def _current_center_fit(scan_record, processing):
-    """Require a completed fit matching the current mask and settings."""
-    center = get_beam_center(processing)
-
+    """Require a completed fit matching this scan's pair, mask and settings."""
     try:
         mask = scan_record["final_mask"]
         entry = scan_record["beam_center_fit"]["history"][-1]
@@ -842,23 +927,39 @@ def _current_center_fit(scan_record, processing):
             "Run beam-center fitting before reviewing or integrating."
         ) from error
 
-    if entry.get("scan_id") != int(scan_record["scan_id"]):
+    if not isinstance(entry, dict):
+        raise ValueError("The recorded fit is invalid. Refit first.")
+
+    pair_id = _scan_pair_id(scan_record, mask)
+    center = get_beam_center(processing, pair_id)
+
+    if (
+        entry.get("scan_id") != int(scan_record["scan_id"])
+        or entry.get("polarization_deg") != float(scan_record["polarization_deg"])
+    ):
         raise ValueError("The recorded fit belongs to a different scan")
+
+    if (
+        entry.get("mask_pair_id") != pair_id
+        or entry.get("mask_pair_polarizations")
+        != mask.attrs["mask_pair_polarizations"]
+    ):
+        raise ValueError(
+            "The polarization pair has changed since fitting. Refit first."
+        )
 
     if (
         not entry.get("mask_id")
         or entry["mask_id"] != mask.attrs.get("mask_id")
     ):
-        raise ValueError(
-            "The final mask has changed since fitting. Refit first."
-        )
+        raise ValueError("The final mask has changed since fitting. Refit first.")
 
     if (
         entry.get("beam_center") != center
         or mask.attrs.get("beam_center") != center
     ):
         raise ValueError(
-            "The configured center has changed. "
+            f"The configured center for pair {pair_id!r} has changed. "
             "Rebuild the masks and refit."
         )
 
@@ -875,85 +976,106 @@ def _current_center_fit(scan_record, processing):
         )
 
     if not entry.get("pass_id"):
-        raise ValueError(
-            "The recorded fit has no pass identifier. Refit first."
-        )
+        raise ValueError("The recorded fit has no pass identifier. Refit first.")
 
     return entry
 
 
-def check_beam_center_consistency(scans, processing):
-    """Compare the fitted median with the configured mask center."""
-    if not scans:
-        raise ValueError("No scans were supplied for the consistency check")
-
-    center = get_beam_center(processing)
-    entries = [
-        _current_center_fit(record, processing)
-        for record in scans.values()
-    ]
-
-    if len({entry["pass_id"] for entry in entries}) != 1:
-        raise ValueError(
-            "The scans were not fitted in the same pass. Refit the set."
-        )
-
-    fitted = np.asarray([
-        [entry["fine_best"]["x"], entry["fine_best"]["y"]]
-        for entry in entries
-    ], dtype=float)
-
-    if not np.all(np.isfinite(fitted)):
-        raise ValueError("Fitted centers must be finite")
-
-    median_values = np.median(fitted, axis=0)
-    median = {
-        "x": float(median_values[0]),
-        "y": float(median_values[1]),
-    }
-    difference = {
-        axis: median[axis] - center[axis]
-        for axis in ("x", "y")
-    }
+def check_beam_center_consistency(scans, processing, mask_pairs):
+    """Compare each pair's fitted median with its configured mask center."""
+    centers = _validated_scan_pairs(scans, processing, mask_pairs)
     tolerance = float(processing["beam_center_fit"]["fine_step"])
 
     if not np.isfinite(tolerance) or tolerance <= 0:
         raise ValueError("fine_step must be positive and finite")
 
-    return {
-        "center": center,
-        "median": median,
-        "difference": difference,
-        "tolerance": tolerance,
-        "within_tolerance": (
-            max(abs(value) for value in difference.values())
-            <= tolerance + 1e-9
-        ),
-        "pass_id": entries[0]["pass_id"],
-    }
+    reviews = {}
+    for pair_id, pair in mask_pairs.items():
+        entries = [
+            _current_center_fit(scans[polarization], processing)
+            for polarization in pair
+        ]
+
+        if len({entry["pass_id"] for entry in entries}) != 1:
+            raise ValueError(
+                f"The scans in pair {pair_id!r} were not fitted in the same pass. "
+                "Refit before reviewing."
+            )
+
+        fitted = np.asarray([
+            [entry["fine_best"]["x"], entry["fine_best"]["y"]]
+            for entry in entries
+        ], dtype=float)
+
+        if not np.all(np.isfinite(fitted)):
+            raise ValueError(f"Fitted centers for pair {pair_id!r} must be finite")
+
+        median_values = np.median(fitted, axis=0)
+        median = {
+            "x": float(median_values[0]),
+            "y": float(median_values[1]),
+        }
+        center = centers[pair_id]
+        difference = {
+            axis: median[axis] - center[axis]
+            for axis in ("x", "y")
+        }
+
+        reviews[pair_id] = {
+            "pair_id": pair_id,
+            "polarizations": list(pair),
+            "center": deepcopy(center),
+            "median": median,
+            "difference": difference,
+            "tolerance": tolerance,
+            "within_tolerance": (
+                max(abs(value) for value in difference.values())
+                <= tolerance + 1e-9
+            ),
+            "pass_id": entries[0]["pass_id"],
+        }
+
+    return reviews
 
 
-def approve_beam_center(scans, processing, *, approve=False):
-    """Approve the configured center after reviewing a consistent fit."""
+def approve_beam_center(
+    scans,
+    processing,
+    mask_pairs,
+    *,
+    pair_id,
+    approve=False,
+):
+    """Approve one pair's configured center after reviewing its fits."""
     if approve is not True:
         raise ValueError(
-            "Review the fits, then explicitly approve the center."
+            "Review this pair's fits, then explicitly approve its center."
         )
 
-    review = check_beam_center_consistency(scans, processing)
+    if pair_id not in mask_pairs:
+        raise ValueError(f"Unknown polarization pair: {pair_id!r}")
+
+    review = check_beam_center_consistency(
+        scans,
+        processing,
+        mask_pairs,
+    )[pair_id]
 
     if not review["within_tolerance"]:
         raise ValueError(
-            "The fitted median does not match the configured center. "
-            "Update [beam_center], rebuild the masks, and refit."
+            f"The fitted median for pair {pair_id!r} does not match its center. "
+            f"Update [beam_centers.{pair_id}], rebuild the masks, and refit."
         )
 
     approvals = {}
-
-    for polarization, record in scans.items():
-        entry = _current_center_fit(record, processing)
+    for polarization in mask_pairs[pair_id]:
+        entry = _current_center_fit(scans[polarization], processing)
         approvals[polarization] = {
             "center": deepcopy(review["center"]),
+            "mask_pair_id": pair_id,
+            "mask_pair_polarizations": deepcopy(
+                entry["mask_pair_polarizations"]
+            ),
             "pass_id": entry["pass_id"],
             "mask_id": entry["mask_id"],
         }
@@ -965,20 +1087,23 @@ def approve_beam_center(scans, processing, *, approve=False):
 
 
 def get_approved_beam_center(scan_record, processing):
-    """Require current approval before using the center for integration."""
+    """Require current pair-specific approval before integration."""
     entry = _current_center_fit(scan_record, processing)
-    center = get_beam_center(processing)
+    center = get_beam_center(processing, entry["mask_pair_id"])
     approval = scan_record.get("beam_center_approval")
 
     if (
         not isinstance(approval, dict)
         or approval.get("center") != center
+        or approval.get("mask_pair_id") != entry["mask_pair_id"]
+        or approval.get("mask_pair_polarizations")
+        != entry["mask_pair_polarizations"]
         or approval.get("pass_id") != entry["pass_id"]
         or approval.get("mask_id") != entry["mask_id"]
     ):
         raise ValueError(
-            "This center has not been approved for the current fit and mask. "
-            "Review the fit and run the approval cell first."
+            "This pair's center has not been approved for the current fit "
+            "and mask. Review the fits and run the pair approval cell first."
         )
 
     return deepcopy(center)

@@ -34,7 +34,11 @@ apply_postmask = true
 [runtime]
 beam_center_jobs = 32
 
-[beam_center]
+[beam_centers."ksr216_2026apr_repeats_01_pair_0_90"]
+center_x = 473.05
+center_y = 514.7
+
+[beam_centers."ksr216_2026apr_repeats_01_pair_45_135"]
 center_x = 473.05
 center_y = 514.7
 

@@ -16,38 +16,84 @@ TABLE_FILES = {
 }
 
 
-def get_beam_center(processing):
-    """Read the single configured center used throughout the workup."""
+def get_beam_center(processing, pair_id):
+    """Read the configured beam center for one polarization pair."""
     obsolete_keys = {
         "center_mask": ("beam_center_x_guess", "beam_center_y_guess"),
         "beam_center_fit": ("initial_center_x", "initial_center_y"),
     }
 
-    if "shared_beam_center" in processing or any(
-        key in processing.get(section, {})
-        for section, keys in obsolete_keys.items()
-        for key in keys
+    if (
+        "beam_center" in processing
+        or "shared_beam_center" in processing
+        or any(
+            key in processing.get(section, {})
+            for section, keys in obsolete_keys.items()
+            for key in keys
+        )
     ):
         raise ValueError(
-            "Remove the old center-coordinate settings. "
-            "Use only [beam_center] center_x and center_y."
+            "Remove the single or obsolete center-coordinate settings. "
+            "Use a separate [beam_centers.<pair_id>] table for each pair."
         )
 
+    if not isinstance(pair_id, str) or not pair_id:
+        raise ValueError("A nonempty polarization pair_id is required")
+
     try:
-        settings = processing["beam_center"]
+        settings = processing["beam_centers"][pair_id]
+
+        if not isinstance(settings, dict):
+            raise TypeError("Center settings must be a table")
+
+        if any(
+            isinstance(settings.get(key), bool)
+            for key in ("center_x", "center_y")
+        ):
+            raise ValueError("Center coordinates cannot be true or false")
+
         center = {
             "x": float(settings["center_x"]),
             "y": float(settings["center_y"]),
         }
-    except (KeyError, TypeError, ValueError) as error:
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
         raise ValueError(
-            "Add numeric center_x and center_y under [beam_center]."
+            f"Add numeric center_x and center_y under "
+            f"[beam_centers.{pair_id}]."
         ) from error
 
     if not all(isfinite(value) for value in center.values()):
-        raise ValueError("Beam-center coordinates must be finite")
+        raise ValueError(
+            f"Beam-center coordinates for pair {pair_id!r} must be finite"
+        )
 
     return center
+
+
+def get_beam_centers(processing, mask_pairs):
+    """Require exactly one configured center for every mask-sharing pair."""
+    if not mask_pairs:
+        raise ValueError("No polarization pairs were supplied")
+
+    configured = processing.get("beam_centers")
+    if not isinstance(configured, dict):
+        raise ValueError(
+            "Add a [beam_centers.<pair_id>] table for every polarization pair"
+        )
+
+    missing = set(mask_pairs) - set(configured)
+    unknown = set(configured) - set(mask_pairs)
+
+    if missing or unknown:
+        raise ValueError(
+            "Beam-center entries must match the configured polarization pairs. "
+            f"Missing: {sorted(missing)}; unknown: {sorted(unknown)}"
+        )
+
+    return {
+        pair_id: get_beam_center(processing, pair_id)
+        for pair_id in mask_pairs
+    }
 
 
 def read_config_tables(config_dir=None):

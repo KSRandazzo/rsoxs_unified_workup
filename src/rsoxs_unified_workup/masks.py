@@ -2,7 +2,7 @@ import numpy as np
 from skimage.draw import polygon2mask
 import xarray as xr
 from copy import deepcopy
-from rsoxs_unified_workup.config import get_beam_center
+from rsoxs_unified_workup.config import get_beam_centers
 from uuid import uuid4
 
 
@@ -316,10 +316,10 @@ def _build_center_mask_for_pair(
     saturation_masks,
     beamstop_vertices,
     processing,
+    center,
 ):
-    """Build circular center masks using the configured beam center."""
+    """Build circular center masks using this pair's configured center."""
     settings = processing["center_mask"]
-    center = get_beam_center(processing)
     center_x = center["x"]
     center_y = center["y"]
 
@@ -468,8 +468,9 @@ def build_center_masks(
     processing,
     mask_pairs,
 ):
-    """Build one center mask per pair and energy, using a shared center."""
+    """Build one center mask per pair and energy, using that pair's center."""
     _validate_mask_pairs(saturation_masks, mask_pairs)
+    beam_centers = get_beam_centers(processing, mask_pairs)
     center_masks = {}
     center_mask_summaries = {}
 
@@ -521,6 +522,7 @@ def build_center_masks(
             saturation_masks=reference,
             beamstop_vertices=beamstop_vertices,
             processing=processing,
+            center=beam_centers[pair_id],
         )
 
         for polarization in polarizations:

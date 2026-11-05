@@ -625,8 +625,6 @@ def plot_final_masked_frames(
     """Review selected final masked frames and outer usable radius."""
     row_count = len(scans)
     first_scan = next(iter(scans.values()))
-    center = first_scan["final_mask"].attrs["beam_center"]
-    center_settings = first_scan["final_mask"].attrs["center_mask_settings"]
 
     energy_indices = review_energy_indices(
         scan_record=first_scan,
@@ -646,14 +644,15 @@ def plot_final_masked_frames(
         energy_count,
     )
 
-    center_x = center["x"]
-    center_y = center["y"]
-    outer_radius = center_settings["outer_usable_radius"]
-
     for row, (polarization, scan_data) in enumerate(
         scans.items()
     ):
         data = scan_data["masked_data_final"]
+        center = scan_data["final_mask"].attrs["beam_center"]
+        center_settings = scan_data["final_mask"].attrs["center_mask_settings"]
+        center_x = center["x"]
+        center_y = center["y"]
+        outer_radius = center_settings["outer_usable_radius"]
 
         for column, index in enumerate(energy_indices):
             axis = axes[row, column]
@@ -1414,11 +1413,6 @@ def plot_anisotropy_sector_overlays(
 ):
     """Overlay configured anisotropy sectors on detector frames."""
     processing = configuration["processing"]
-    first_scan = next(iter(scans.values()))
-    center = (
-        first_scan["integration"]["beam_center_x"],
-        first_scan["integration"]["beam_center_y"],
-    )
     scan_by_id = {
         int(record["scan_id"]): record
         for record in configuration["scans"]
@@ -1465,6 +1459,10 @@ def plot_anisotropy_sector_overlays(
                 polarizations
             ):
                 scan_record = scans[polarization]
+                center = (
+                    scan_record["integration"]["beam_center_x"],
+                    scan_record["integration"]["beam_center_y"],
+                )
                 data = scan_record["masked_data_final"]
                 energies = np.asarray(
                     data.energy.values,

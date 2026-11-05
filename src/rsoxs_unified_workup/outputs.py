@@ -10,7 +10,13 @@ import numpy as np
 import xarray as xr
 import zarr
 
-from rsoxs_unified_workup.config import PROJECT_ROOT
+from rsoxs_unified_workup.config import (
+    PROJECT_ROOT,
+    get_mask_pairs,
+)
+from rsoxs_unified_workup.beam_center import (
+    get_approved_beam_center,
+)
 
 
 def _polarization_value(value):
@@ -474,6 +480,257 @@ def build_pointwise_anisotropy_dataset(
     return dataset
 
 
+def _check_export_grid(value, reference, label, dimensions):
+    """Require matching native coordinates without resampling."""
+    if isinstance(value, (dict, xr.Dataset)):
+        for name, item in value.items():
+            _check_export_grid(
+                item,
+                reference,
+                f"{label}/{name}",
+                dimensions,
+            )
+
+    elif isinstance(value, xr.DataArray):
+        for dimension in dimensions:
+            if dimension in value.dims and not np.array_equal(
+                value[dimension].values,
+                reference[dimension].values,
+            ):
+                raise ValueError(
+                    f"{label} has different {dimension} coordinates. "
+                    "Recalculate this product on its pair's native grid."
+                )
+
+
+def build_pair_workup_datasets(
+    configuration,
+    scans,
+    anisotropy_results,
+    pointwise_anisotropy_results,
+):
+    """Build separate export datasets for each pair's native q grid."""
+    mask_pairs = get_mask_pairs(configuration)
+    processing = configuration["processing"]
+
+    if set(scans) != {
+        polarization
+        for pair in mask_pairs.values()
+        for polarization in pair
+    }:
+        raise ValueError(
+            "Loaded scans do not match the configured pairs"
+        )
+
+    if (
+        not anisotropy_results
+        or set(anisotropy_results)
+        != set(pointwise_anisotropy_results)
+    ):
+        raise ValueError(
+            "Sector and pointwise normalization modes do not match"
+        )
+
+    for mode in anisotropy_results:
+        if set(pointwise_anisotropy_results[mode]) != set(mask_pairs):
+            raise ValueError(
+                f"Pointwise pairs do not match configuration in {mode}"
+            )
+
+        if any(
+            sector["pair_id"] not in mask_pairs
+            for sector in anisotropy_results[mode].values()
+        ):
+            raise ValueError(f"Unknown sector pair in {mode}")
+
+    datasets = {}
+
+    for pair_id, pair in mask_pairs.items():
+        if (
+            not isinstance(pair_id, str)
+            or not pair_id
+            or pair_id in (".", "..")
+            or "/" in pair_id
+            or "\\" in pair_id
+        ):
+            raise ValueError(
+                f"Pair ID is not a safe Zarr group name: {pair_id!r}"
+            )
+
+        pair_scans = {
+            polarization: scans[polarization]
+            for polarization in pair
+        }
+        reference = pair_scans[pair[0]]["integration"]["remeshed"]
+        centers = []
+
+        for polarization, record in pair_scans.items():
+            if float(record["polarization_deg"]) != float(polarization):
+                raise ValueError(
+                    "Scan dictionary keys do not match "
+                    "polarization metadata"
+                )
+
+            mask = record["final_mask"]
+
+            if (
+                mask.attrs.get("mask_pair_id") != pair_id
+                or set(
+                    mask.attrs.get("mask_pair_polarizations", [])
+                ) != set(pair)
+            ):
+                raise ValueError(
+                    f"Scan {record['scan_id']} has the wrong mask pair"
+                )
+
+            center = get_approved_beam_center(record, processing)
+            centers.append(center)
+
+            expected = {
+                "beam_center_x": center["x"],
+                "beam_center_y": center["y"],
+                "mask_pair_id": pair_id,
+                "mask_id": mask.attrs["mask_id"],
+                "beam_center_pass_id": (
+                    record["beam_center_approval"]["pass_id"]
+                ),
+            }
+
+            for section in ("integration", "dark_integration"):
+                result = record[section]
+
+                if any(
+                    result.get(key) != value
+                    for key, value in expected.items()
+                ):
+                    raise ValueError(
+                        f"Scan {record['scan_id']} has stale or missing "
+                        f"{section} provenance. "
+                        "Recalculate it before exporting."
+                    )
+
+            for section in (
+                "integration",
+                "dark_integration",
+                "normalization",
+                "flux_correction",
+            ):
+                _check_export_grid(
+                    record[section],
+                    reference,
+                    f"{pair_id}/{polarization}/{section}",
+                    ("energy", "chi", "q"),
+                )
+
+        if centers[0] != centers[1]:
+            raise ValueError(
+                f"The two scans in pair {pair_id!r} "
+                "use different centers"
+            )
+
+        pair_sectors = {
+            mode: {
+                sector_id: sector
+                for sector_id, sector in results.items()
+                if sector["pair_id"] == pair_id
+            }
+            for mode, results in anisotropy_results.items()
+        }
+
+        if any(
+            not sectors
+            for sectors in pair_sectors.values()
+        ):
+            raise ValueError(
+                f"Sector results are missing for pair {pair_id!r}"
+            )
+
+        pair_pointwise = {
+            mode: {pair_id: results[pair_id]}
+            for mode, results in pointwise_anisotropy_results.items()
+        }
+
+        _check_export_grid(
+            pair_sectors,
+            reference,
+            f"{pair_id}/sectors",
+            ("energy", "q"),
+        )
+        _check_export_grid(
+            pair_pointwise,
+            reference,
+            f"{pair_id}/pointwise",
+            ("energy", "q"),
+        )
+
+        products = build_scan_products_dataset(pair_scans)
+        polarizations = products["polarization"].values
+
+        products = products.assign_coords(
+            scan_id=(
+                "polarization",
+                [
+                    int(pair_scans[pol]["scan_id"])
+                    for pol in polarizations
+                ],
+            ),
+            beam_center_x=(
+                "polarization",
+                [centers[0]["x"]] * len(pair),
+            ),
+            beam_center_y=(
+                "polarization",
+                [centers[0]["y"]] * len(pair),
+            ),
+            mask_id=(
+                "polarization",
+                [
+                    pair_scans[pol]["final_mask"].attrs["mask_id"]
+                    for pol in polarizations
+                ],
+            ),
+            beam_center_pass_id=(
+                "polarization",
+                [
+                    pair_scans[pol]["beam_center_approval"]["pass_id"]
+                    for pol in polarizations
+                ],
+            ),
+        )
+
+        for coordinate in ("beam_center_x", "beam_center_y"):
+            products[coordinate].attrs["units"] = "pixel"
+
+        pair_datasets = {
+            "scan_products": products,
+            "sector_anisotropy": (
+                build_sector_anisotropy_dataset(pair_sectors)
+            ),
+            "pointwise_anisotropy": (
+                build_pointwise_anisotropy_dataset(pair_pointwise)
+            ),
+        }
+
+        for name, dataset in pair_datasets.items():
+            _check_export_grid(
+                dataset,
+                reference,
+                f"{pair_id}/{name}",
+                ("energy", "q"),
+            )
+
+            dataset.attrs.update({
+                "polarization_pair_id": pair_id,
+                "polarizations": list(pair),
+                "beam_center": dict(centers[0]),
+                "q_grid_scope": "polarization_pair",
+            })
+
+            datasets[f"pairs/{pair_id}/{name}"] = dataset
+
+    return datasets
+
+
 def _json_ready(value):
     """Convert scientific values to JSON-safe values."""
     if isinstance(value, (datetime, date)):
@@ -542,7 +799,7 @@ def build_manifest(configuration, datasets):
     git_status = _git_value("status", "--porcelain")
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at_utc": datetime.now(
             timezone.utc
         ).isoformat(),
@@ -620,24 +877,18 @@ def save_workup_results(
     overwrite=False,
 ):
     """Save one complete workup as Zarr plus JSON metadata."""
-    datasets = {
-        "scan_products": build_scan_products_dataset(scans),
-        "sector_anisotropy": (
-            build_sector_anisotropy_dataset(
-                anisotropy_results
-            )
-        ),
-        "aggregate_anisotropy": (
-            build_aggregate_anisotropy_dataset(
-                aggregate_anisotropy_results
-            )
-        ),
-        "pointwise_anisotropy": (
-            build_pointwise_anisotropy_dataset(
-                pointwise_anisotropy_results
-            )
-        ),
-    }
+    if aggregate_anisotropy_results is not None:
+        raise ValueError(
+            "Cross-pair aggregate export is paused. "
+            "Pass aggregate_anisotropy_results=None."
+        )
+
+    datasets = build_pair_workup_datasets(
+        configuration=configuration,
+        scans=scans,
+        anisotropy_results=anisotropy_results,
+        pointwise_anisotropy_results=pointwise_anisotropy_results,
+    )
 
     scan_set_id = str(
         configuration["scan_set"]["scan_set_id"]
@@ -814,45 +1065,62 @@ def print_workup_export_tree(
             children,
         )
 
-    group_nodes = []
-
-    for group_name in sorted(store.group_keys()):
-        group = store[group_name]
-        variable_names = set(
-            manifest["zarr_groups"][group_name]
-        )
+    def group_node(group_name, group):
         array_names = sorted(group.array_keys())
+        variable_names = manifest["zarr_groups"].get(group.path)
+        children = []
 
-        children = [
-            (
-                "data variables",
-                [
-                    array_node(name, group[name])
-                    for name in array_names
-                    if name in variable_names
-                ],
-            ),
-            (
-                "coordinates",
-                [
-                    array_node(name, group[name])
-                    for name in array_names
-                    if name not in variable_names
-                ],
-            ),
-        ]
+        if variable_names is not None:
+            variable_names = set(variable_names)
+            label = f"{group_name}/ [xarray Dataset]"
+
+            children.extend([
+                (
+                    "data variables",
+                    [
+                        array_node(name, group[name])
+                        for name in array_names
+                        if name in variable_names
+                    ],
+                ),
+                (
+                    "coordinates",
+                    [
+                        array_node(name, group[name])
+                        for name in array_names
+                        if name not in variable_names
+                    ],
+                ),
+            ])
+
+        else:
+            label = f"{group_name}/ [Zarr group]"
+
+            if array_names:
+                children.append((
+                    "arrays",
+                    [
+                        array_node(name, group[name])
+                        for name in array_names
+                    ],
+                ))
 
         if group.attrs:
             children.append(
-                metadata_node(
-                    "attributes",
-                    dict(group.attrs),
-                )
+                metadata_node("attributes", dict(group.attrs))
             )
 
-        group_nodes.append(
-            (f"{group_name}/ [xarray Dataset]", children)
+        children.extend(
+            group_node(name, group[name])
+            for name in sorted(group.group_keys())
         )
+
+        return label, children
+
+    group_nodes = [
+        group_node(name, store[name])
+        for name in sorted(store.group_keys())
+    ]
 
     nodes = [
         metadata_node(manifest_path.name, manifest),

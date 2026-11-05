@@ -358,6 +358,11 @@ def integrate_scan(scan_record, processing):
     return {
         "beam_center_x": shared_center["x"],
         "beam_center_y": shared_center["y"],
+        "mask_pair_id": final_mask.attrs["mask_pair_id"],
+        "mask_id": final_mask.attrs["mask_id"],
+        "beam_center_pass_id": (
+            scan_record["beam_center_approval"]["pass_id"]
+        ),
         "postmask_threshold": postmask_threshold,
         "q_cap": q_cap,
         "remeshed": remeshed,
@@ -378,6 +383,26 @@ def integrate_dark_scan(scan_record, processing):
         processing,
     )
     integration_result = scan_record["integration"]
+    provenance = {
+        "beam_center_x": shared_center["x"],
+        "beam_center_y": shared_center["y"],
+        "mask_pair_id": final_mask.attrs["mask_pair_id"],
+        "mask_id": final_mask.attrs["mask_id"],
+        "beam_center_pass_id": (
+            scan_record["beam_center_approval"]["pass_id"]
+        ),
+    }
+
+    if any(
+        integration_result.get(key) != value
+        for key, value in provenance.items()
+    ):
+        raise ValueError(
+            f"Scan {scan_record['scan_id']} has stale or missing "
+            "integration provenance. Reintegrate the scan "
+            "before integrating its dark frame."
+        )
+
     darks = scan_record["darks"]
 
     if "time" in darks.dims:
@@ -467,6 +492,7 @@ def integrate_dark_scan(scan_record, processing):
     )
 
     return {
+        **provenance,
         "dark_frame_index": dark_frame_index,
         "original_dark": dark_frame,
         "darks_remeshed": darks_remeshed,
