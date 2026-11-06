@@ -703,6 +703,17 @@ def plot_final_masked_frames(
 
 def plot_beam_center_fit(fit_result, scan_record):
     """Review the fitted center, q peaks, and search grids."""
+    fit_settings = fit_result.get("fit_settings")
+    if fit_settings is None:
+        fit_settings = fit_result["history"][-1]["fit_settings"]
+
+    q_target = float(fit_settings["q_target"])
+    q_window_halfwidth = float(
+        fit_settings.get(
+            "q_window_halfwidth",
+            fit_settings.get("q_window_width"),
+        )
+    )
     fine_center = fit_result["fine_best"]
     coarse_center = fit_result["coarse_best"]
     remeshed = fit_result["selected_remesh"]
@@ -726,7 +737,7 @@ def plot_beam_center_fit(fit_result, scan_record):
             remeshed,
             shading="auto",
         )
-        axes[0, 0].set_title("Integrated data after postmask")
+        axes[0, 0].set_title("Data used for beam-center scoring")
         axes[0, 0].set_xlabel("q")
         axes[0, 0].set_ylabel("chi")
         fig.colorbar(
@@ -748,7 +759,25 @@ def plot_beam_center_fit(fit_result, scan_record):
         axes[0, 1].set_title("Azimuthal-region intensity curves")
         axes[0, 1].set_xlabel("q")
         axes[0, 1].set_ylabel("Intensity")
-        axes[0, 1].legend()
+        for axis in (axes[0, 0], axes[0, 1]):
+            axis.axvspan(
+                q_target - q_window_halfwidth,
+                q_target + q_window_halfwidth,
+                color="yellow",
+                alpha=0.12,
+                linewidth=0,
+                label=f"Fit window ±{q_window_halfwidth:g} Å⁻¹",
+                zorder=2,
+            )
+            axis.axvline(
+                q_target,
+                color="yellow",
+                linestyle=":",
+                linewidth=0.8,
+                label=f"Target q={q_target:g} Å⁻¹",
+                zorder=3,
+            )
+            axis.legend(fontsize=8)
 
         for center, curve in fit_result[
             "fit_curves"

@@ -71,14 +71,14 @@ def gaussian(x, amplitude, center, sigma, offset):
     )
 
 
-def fit_peak(q, intensity, q_target, q_window_width):
+def fit_peak(q, intensity, q_target, q_window_halfwidth):
     """Fit a Gaussian peak near the configured q target."""
     q = np.asarray(q)
     intensity = np.asarray(intensity)
 
     selected = (
-        (q > q_target - q_window_width)
-        & (q < q_target + q_window_width)
+        (q > q_target - q_window_halfwidth)
+        & (q < q_target + q_window_halfwidth)
         & np.isfinite(q)
         & np.isfinite(intensity)
     )
@@ -122,7 +122,7 @@ def locate_peak_q(
     chi_halfwidth,
     energy_value,
     q_target,
-    q_window_width,
+    q_window_halfwidth,
 ):
     """Locate the fitted q peak in four azimuthal regions."""
     if energy_value == "all":
@@ -150,7 +150,7 @@ def locate_peak_q(
             q_values,
             intensity_values,
             q_target,
-            q_window_width,
+            q_window_halfwidth,
         )
 
         if fit_curve is None:
@@ -214,7 +214,7 @@ def prepare_fit_inputs(data, final_mask, energy_value):
 
 
 def reflect_integrated_mask(masked_pixels, reflection_mode):
-    """Reflect a post-integration mask around configured symmetries."""
+    """Reflect mask exclusions using the existing nearest-bin rule."""
     if reflection_mode in (None, "none"):
         return masked_pixels
 
@@ -243,33 +243,40 @@ def reflect_integrated_mask(masked_pixels, reflection_mode):
     masked_chi_indexes, masked_q_indexes = np.where(
         mask_2d.values
     )
-    masked_chi = chi_values[masked_chi_indexes]
-    masked_q = q_values[masked_q_indexes]
 
     reflected_values = np.zeros_like(
         mask_2d.values,
         dtype=bool,
     )
 
-    for shift in chi_shifts[reflection_mode]:
-        shifted_chi = wrap_chi(masked_chi + shift)
+    if masked_chi_indexes.size:
+        nearest_q_indexes = np.argmin(
+            np.abs(
+                q_values[:, np.newaxis]
+                - q_values[np.newaxis, :]
+            ),
+            axis=0,
+        )
 
-        for chi_value, q_value in zip(
-            shifted_chi,
-            masked_q,
-        ):
-            chi_index = np.argmin(
-                np.abs(chi_values - chi_value)
+        for shift in chi_shifts[reflection_mode]:
+            shifted_chi = wrap_chi(chi_values + shift)
+            nearest_chi_indexes = np.argmin(
+                np.abs(
+                    chi_values[:, np.newaxis]
+                    - shifted_chi[np.newaxis, :]
+                ),
+                axis=0,
             )
-            q_index = np.argmin(
-                np.abs(q_values - q_value)
-            )
-            reflected_values[chi_index, q_index] = True
+
+            reflected_values[
+                nearest_chi_indexes[masked_chi_indexes],
+                nearest_q_indexes[masked_q_indexes],
+            ] = True
 
     full_mask_2d = mask_2d.copy(
         data=mask_2d.values | reflected_values
     )
-    full_mask = full_mask_2d.broadcast_like(
+    return full_mask_2d.broadcast_like(
         masked_pixels
     ).transpose(*masked_pixels.dims)
 
@@ -305,6 +312,9 @@ def integrate_at_center(
     apply_postmask,
 ):
     """Integrate one energy using one candidate beam center."""
+    beam_center_x = float(beam_center_x)
+    beam_center_y = float(beam_center_y)
+
     mask_values = np.asarray(
         selected_mask.values,
         dtype=bool,
@@ -431,35 +441,33 @@ def beam_center_cost(
         postmask_threshold=fit_config[
             "postmask_threshold"
         ],
-        reflection_mode=None,
+        reflection_mode=fit_config["reflection_mode"],
         apply_postmask=fit_config["apply_postmask"],
     )
 
     _, _, _, peaks = locate_peak_q(
-        clean_data=integration["clean"],
+        clean_data=integration["symmetry_clean"],
         polarization=polarization,
         chi_halfwidth=fit_config[
             "chi_half_width_degrees"
         ],
         energy_value="all",
         q_target=fit_config["q_target"],
-        q_window_width=fit_config["q_window_width"],
+        q_window_halfwidth=fit_config["q_window_halfwidth"],
     )
 
     peak_values = np.asarray(
         list(peaks.values()),
         dtype=float,
     )
-    peak_values = peak_values[np.isfinite(peak_values)]
 
-    if len(peak_values) < 2:
+    if (
+        peak_values.size != 4
+        or not np.all(np.isfinite(peak_values))
+    ):
         return np.nan
 
-    return float(
-        np.mean(
-            (peak_values - np.mean(peak_values)) ** 2
-        )
-    )
+    return float(np.var(peak_values))
 
 
 def search_values(center, radius, step):
@@ -761,14 +769,14 @@ def fit_scan_beam_center(
         fit_curves,
         peaks,
     ) = locate_peak_q(
-        clean_data=final_integration["clean"],
+        clean_data=final_integration["symmetry_clean"],
         polarization=polarization,
         chi_halfwidth=fit_config[
             "chi_half_width_degrees"
         ],
         energy_value="all",
         q_target=fit_config["q_target"],
-        q_window_width=fit_config["q_window_width"],
+        q_window_halfwidth=fit_config["q_window_halfwidth"],
     )
 
     print(
@@ -781,6 +789,7 @@ def fit_scan_beam_center(
         "scan_id": int(scan_record["scan_id"]),
         "polarization_deg": polarization,
         "actual_fit_energy": actual_energy,
+        "fit_settings": deepcopy(fit_config),
         "selected_data": selected_data,
         "selected_mask": selected_mask,
         "coarse_grid": coarse_grid,
@@ -963,7 +972,14 @@ def _current_center_fit(scan_record, processing):
             "Rebuild the masks and refit."
         )
 
-    if entry.get("fit_settings") != processing["beam_center_fit"]:
+
+    recorded_fit_settings = deepcopy(entry.get("fit_settings", {}))
+    if "q_window_width" in recorded_fit_settings:
+        recorded_fit_settings["q_window_halfwidth"] = (
+            recorded_fit_settings.pop("q_window_width")
+        )
+
+    if recorded_fit_settings != processing["beam_center_fit"]:
         raise ValueError("Fitting settings have changed. Refit first.")
 
     if (
