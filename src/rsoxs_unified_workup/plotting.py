@@ -3,6 +3,7 @@ import numpy as np
 from matplotlib.colors import LogNorm
 from matplotlib.patches import Circle, Patch, Wedge
 import matplotlib.ticker as mticker
+from rsoxs_unified_workup.config import validate_requested_energies
 
 
 def review_energy_indices(scan_record, processing, energy_values):
@@ -51,6 +52,13 @@ def review_energy_indices(scan_record, processing, energy_values):
         raise ValueError(
             "Requested energies must be positive, finite numbers in eV"
         )
+
+    validate_requested_energies(
+        scan_record=scan_record,
+        energy_values=available,
+        requested_energies=requested,
+        setting_name="plotting.energies_ev",
+    )
 
     indices = []
 

@@ -2,6 +2,7 @@ from pathlib import Path
 import tomllib
 import pandas as pd
 from math import isfinite
+import numpy as np
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -144,6 +145,103 @@ def _single_record(rows, description):
     return rows.iloc[0].to_dict()
 
 
+def _validate_scan_set_metadata(scan_set):
+    """Require separate acquisition-type and energy-region metadata."""
+    scan_set_id = scan_set["scan_set_id"]
+    scan_type = scan_set.get("scan_type")
+
+    if scan_type not in ("repeats", "long"):
+        raise ValueError(
+            f"Scan set {scan_set_id!r}: scan_type must be "
+            f"'repeats' or 'long', not {scan_type!r}. "
+            "Record the energy region separately in energy_region."
+        )
+
+    energy_region = scan_set.get("energy_region")
+
+    if (
+        not isinstance(energy_region, str)
+        or not energy_region.strip()
+    ):
+        raise ValueError(
+            f"Scan set {scan_set_id!r}: energy_region must "
+            "contain a nonempty label, such as C or O."
+        )
+
+
+def validate_requested_energies(
+    scan_record,
+    energy_values,
+    requested_energies,
+    setting_name,
+):
+    """Reject out-of-range long-scan requests before nearest selection."""
+    scan_id = scan_record["scan_id"]
+    scan_type = scan_record.get("scan_type")
+
+    if scan_type == "repeats":
+        return
+
+    if scan_type != "long":
+        raise ValueError(
+            f"Scan {scan_id}: scan_type must be 'repeats' or 'long', "
+            f"not {scan_type!r}. Reload the updated configuration "
+            "and scan records."
+        )
+
+    available = np.asarray(energy_values, dtype=float)
+    requested = np.asarray(requested_energies, dtype=float)
+
+    if (
+        available.ndim != 1
+        or available.size == 0
+        or not np.all(np.isfinite(available))
+        or np.any(available <= 0)
+    ):
+        raise ValueError(
+            f"Scan {scan_id}: measured energies must be a "
+            "nonempty, positive, finite 1D array."
+        )
+
+    lower = float(available.min())
+    upper = float(available.max())
+    available_range = (
+        f"Available measured energy range: "
+        f"{lower:.12g} to {upper:.12g} eV."
+    )
+
+    if (
+        requested.ndim != 1
+        or requested.size == 0
+        or not np.all(np.isfinite(requested))
+        or np.any(requested <= 0)
+    ):
+        raise ValueError(
+            f"Scan {scan_id}: {setting_name} must contain "
+            f"positive, finite energies. {available_range}"
+        )
+
+    # Allow numerical roundoff, not a meaningful extension of the range.
+    tolerance = (
+        16 * np.finfo(float).eps
+        * max(1.0, abs(lower), abs(upper))
+    )
+    outside = (
+        (requested < lower - tolerance)
+        | (requested > upper + tolerance)
+    )
+
+    if np.any(outside):
+        invalid = ", ".join(
+            f"{value:.12g} eV" for value in requested[outside]
+        )
+        raise ValueError(
+            f"Scan {scan_id}: {setting_name} requests "
+            f"out-of-range energies: {invalid}. "
+            f"{available_range} Choose energies within this range."
+        )
+
+
 def load_scan_set(scan_set_id, config_dir=None):
     """Load a scan set and its linked sample, scans, and pairs."""
     tables = read_config_tables(config_dir)
@@ -154,6 +252,8 @@ def load_scan_set(scan_set_id, config_dir=None):
         ],
         f"scan set named {scan_set_id!r}",
     )
+
+    _validate_scan_set_metadata(scan_set)
 
     sample = _single_record(
         tables["samples"].loc[

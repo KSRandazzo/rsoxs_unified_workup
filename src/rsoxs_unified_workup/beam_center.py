@@ -10,6 +10,7 @@ from uuid import uuid4
 from rsoxs_unified_workup.config import (
     get_beam_center,
     get_beam_centers,
+    validate_requested_energies,
 )
 from rsoxs_unified_workup.masks import _validate_mask_pairs
 
@@ -661,6 +662,14 @@ def fit_scan_beam_center(
 ):
     """Fit one polarization using coarse and fine searches."""
     fit_config = processing["beam_center_fit"]
+
+    validate_requested_energies(
+        scan_record=scan_record,
+        energy_values=scan_record["data"].energy.values,
+        requested_energies=[fit_config["fit_energy"]],
+        setting_name="beam_center_fit.fit_energy",
+    )
+
     pair_id = _scan_pair_id(scan_record, final_mask)
     center = get_beam_center(processing, pair_id)
 
@@ -860,6 +869,18 @@ def fit_scan_set_beam_centers(scans, processing, mask_pairs):
 
     processing_snapshot = deepcopy(processing)
     pairs_snapshot = deepcopy(mask_pairs)
+
+    # Check every scan before starting any candidate-center search.
+    fit_energy = processing_snapshot["beam_center_fit"]["fit_energy"]
+
+    for scan_record in scans.values():
+        validate_requested_energies(
+            scan_record=scan_record,
+            energy_values=scan_record["data"].energy.values,
+            requested_energies=[fit_energy],
+            setting_name="beam_center_fit.fit_energy",
+        )
+
     _validated_scan_pairs(scans, processing_snapshot, pairs_snapshot)
 
     pass_id = uuid4().hex
