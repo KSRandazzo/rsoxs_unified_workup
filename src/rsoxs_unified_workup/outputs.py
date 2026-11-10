@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 import zarr
+import pandas as pd
 
 from rsoxs_unified_workup.config import (
     PROJECT_ROOT,
@@ -106,6 +107,54 @@ def _stack_by_polarization(
     combined.name = name
 
     return combined
+
+
+def build_detector_image_dataset(scan_record, key):
+    """Preserve one scan's loaded detector data or complete dark stack."""
+    if key not in ("data", "darks"):
+        raise ValueError("Detector export key must be 'data' or 'darks'")
+
+    array = scan_record[key]
+    if not isinstance(array, xr.DataArray):
+        raise TypeError(
+            f"Scan {scan_record['scan_id']}: {key} must be a DataArray"
+        )
+
+    original_name = array.name
+    array = array.copy(deep=False)
+    multi_indexes = {}
+
+    # Zarr cannot directly store a pandas MultiIndex. Preserve its
+    # levels as coordinates without sorting, unstacking, or padding.
+    for dimension in array.dims:
+        index = array.indexes.get(dimension)
+        if isinstance(index, pd.MultiIndex):
+            multi_indexes[dimension] = list(index.names)
+            array = array.reset_index(dimension)
+
+    dataset = array.rename(key).to_dataset()
+    dataset.attrs.update({
+        "description": (
+            "Loaded detector images before workup masking and integration"
+            if key == "data"
+            else "All loaded detector dark frames"
+        ),
+        "scan_id": int(scan_record["scan_id"]),
+        "polarization_deg": float(scan_record["polarization_deg"]),
+        "polarization_pair_id": (
+            scan_record["final_mask"].attrs["mask_pair_id"]
+        ),
+        "source_scan_key": key,
+        "original_array_name": original_name,
+        "original_multi_indexes": multi_indexes,
+    })
+
+    if key == "darks":
+        dataset.attrs["integrated_dark_frame_index"] = (
+            scan_record["dark_integration"]["dark_frame_index"]
+        )
+
+    return dataset
 
 
 def build_scan_products_dataset(scans):
@@ -728,6 +777,17 @@ def build_pair_workup_datasets(
 
             datasets[f"pairs/{pair_id}/{name}"] = dataset
 
+        # Preserve each scan separately: no alignment across scans'
+        # detector coordinates, timestamps, or dark-frame counts.
+        for record in pair_scans.values():
+            scan_id = int(record["scan_id"])
+            for key in ("data", "darks"):
+                group_name = f"pairs/{pair_id}/scans/{scan_id}/{key}"
+                datasets[group_name] = build_detector_image_dataset(
+                    record,
+                    key,
+                )
+
     return datasets
 
 
@@ -799,7 +859,7 @@ def build_manifest(configuration, datasets):
     git_status = _git_value("status", "--porcelain")
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at_utc": datetime.now(
             timezone.utc
         ).isoformat(),
@@ -834,6 +894,10 @@ def _zarr_encoding(dataset):
         "energy": 1,
         "chi": 180,
         "q": 250,
+        "system": 1,
+        "time": 1,
+        "pix_y": 512,
+        "pix_x": 512,
     }
     encoding = {}
 
