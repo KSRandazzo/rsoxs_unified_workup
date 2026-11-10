@@ -1,0 +1,52 @@
+[darks]
+upper_percentile = 99.98
+
+[beamstop]
+center_x = 743
+center_y = 189
+length = 900
+width = 54
+angle_degrees = -50
+
+[detector_borders]
+left_pixels = 3
+right_pixels = 3
+bottom_pixels = 6
+top_pixels = 6
+
+[center_mask]
+saturation_search_width = 90
+outer_usable_radius = 459
+
+[beam_center_fit]
+coarse_search_radius = 4
+coarse_step = 1
+fine_search_radius = 0.8
+fine_step = 0.1
+fit_energy = 284.8
+q_target = 0.02201
+q_window_halfwidth = 0.003
+chi_half_width_degrees = 45
+postmask_threshold = 1.0
+reflection_mode = "fourfold"
+apply_postmask = true
+
+[runtime]
+beam_center_jobs = 32
+
+[beam_centers."ksr216_2026apr_longC_0_90_test_pair_0_90"]
+center_x = 472.85
+center_y = 514.8
+
+[integration]
+postmask_threshold = 1.0
+
+[normalization]
+half_ring_center_degrees = 180
+half_ring_halfwidth_degrees = 90
+
+[flux_correction]
+enabled = true
+
+[plotting]
+energies_ev = [284.8, 286.0]

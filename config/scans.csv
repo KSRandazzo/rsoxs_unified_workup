@@ -7,3 +7,5 @@ scan_id,scan_set_id,polarization_deg
 110714,ksr216_2026apr_longC_01,90
 110715,ksr216_2026apr_longC_01,45
 110716,ksr216_2026apr_longC_01,135
+110713,ksr216_2026apr_longC_0_90_test,0
+110714,ksr216_2026apr_longC_0_90_test,90
