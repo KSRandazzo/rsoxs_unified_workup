@@ -340,7 +340,7 @@ def aggregate_anisotropy(anisotropy_results):
 
 
 def build_pointwise_anisotropy_maps(configuration, scans):
-    """Build stitched pointwise maps from uncapped normalization."""
+    """Build stitched pointwise maps from q-capped normalization."""
     pairs_by_id = {
         pair["pair_id"]: pair
         for pair in configuration["polarization_pairs"]
@@ -358,18 +358,16 @@ def build_pointwise_anisotropy_maps(configuration, scans):
     }
 
     def sector_patch(polarization, normalization_key, sector):
-        uncapped = scans[polarization].get(
-            "normalization", {}
-        ).get("uncapped_q")
+        normalization = scans[polarization].get("normalization", {})
 
-        if uncapped is None:
+        if normalization_key not in normalization:
             raise ValueError(
-                "Uncapped normalization is missing. "
+                "Q-capped normalization is missing. "
                 "Rerun normalization for every scan first."
             )
 
         return select_chi_region(
-            uncapped[normalization_key],
+            normalization[normalization_key],
             center_degrees=sector["chi_center_deg"],
             halfwidth_degrees=sector["chi_halfwidth_deg"],
         ).transpose("energy", "chi", "q")
@@ -460,8 +458,8 @@ def build_pointwise_anisotropy_maps(configuration, scans):
             ):
                 array.attrs = {
                     **array.attrs,
-                    "source_product": "clean_uncapped_q",
-                    "q_cap_applied": False,
+                    "source_product": "clean",
+                    "q_cap_applied": True,
                 }
 
             all_results[mode][pair_id] = {
