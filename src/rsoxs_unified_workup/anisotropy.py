@@ -150,7 +150,7 @@ def calculate_sector_anisotropy(
     }
 
 
-def calculate_anisotropy(
+def calculate_sector_anisotropies(
     configuration,
     scans,
 ):
@@ -330,12 +330,12 @@ def aggregate_one_mode(sector_results):
     }
 
 
-def aggregate_anisotropy(anisotropy_results):
+def aggregate_anisotropy(sector_anisotropy_results):
     """Calculate all aggregation methods for every mode."""
     return {
         mode: aggregate_one_mode(sector_results)
         for mode, sector_results
-        in anisotropy_results.items()
+        in sector_anisotropy_results.items()
     }
 
 
@@ -474,3 +474,177 @@ def build_pointwise_anisotropy_maps(configuration, scans):
             }
 
     return all_results
+
+
+def average_pointwise_anisotropy(pointwise_results):
+    """Average pointwise anisotropy over chi, separately for each pair."""
+    averaged_results = {}
+
+    for mode, pair_results in pointwise_results.items():
+        averaged_results[mode] = {}
+
+        for pair_id, result in pair_results.items():
+            values = result["anisotropy"]
+
+            if set(values.dims) != {"energy", "chi", "q"}:
+                raise ValueError(
+                    f"{mode}/{pair_id}: expected energy, chi, and q dimensions"
+                )
+            if values.attrs.get("q_cap_applied") is not True:
+                raise ValueError(
+                    f"{mode}/{pair_id}: rerun q-capped pointwise anisotropy first"
+                )
+
+            values = values.transpose("energy", "chi", "q")
+            mean = values.mean("chi", skipna=True, keep_attrs=True)
+            count = values.count("chi")
+            mean.name = "chi_averaged_pointwise_anisotropy"
+            count.name = "valid_chi_count"
+
+            mean.attrs = {
+                **mean.attrs,
+                "aggregation_method": "mean_pointwise_anisotropy",
+                "averaged_dimension": "chi",
+                "angular_weighting": "equal weight per non-NaN chi bin",
+            }
+            count.attrs = {
+                "description": "Number of non-NaN pointwise anisotropy bins used in the chi mean",
+            }
+
+            averaged_results[mode][pair_id] = {
+                "anisotropy": mean,
+                "valid_chi_count": count,
+            }
+
+    return averaged_results
+
+
+def average_sector_anisotropy(sector_anisotropy_results):
+    """Average sector anisotropies, separately for each pair and mode."""
+    averaged_results = {}
+
+    for mode, sector_results in sector_anisotropy_results.items():
+        sectors_by_pair = {}
+
+        for sector_id, sector in sector_results.items():
+            if set(sector["anisotropy"].dims) != {"energy", "q"}:
+                raise ValueError(
+                    f"{mode}/{sector_id}: expected energy and q dimensions"
+                )
+            sectors_by_pair.setdefault(
+                sector["pair_id"], [],
+            ).append((sector_id, sector))
+
+        averaged_results[mode] = {}
+
+        for pair_id, sectors in sectors_by_pair.items():
+            stack = xr.concat(
+                [
+                    sector["anisotropy"].transpose("energy", "q")
+                    for _, sector in sectors
+                ],
+                dim=xr.IndexVariable(
+                    "sector", [sector_id for sector_id, _ in sectors],
+                ),
+                join="exact",
+                coords="minimal",
+                compat="equals",
+            ).transpose("energy", "sector", "q")
+            stack = stack.assign_coords(
+                sector_label=(
+                    "sector", [sector["label"] for _, sector in sectors],
+                ),
+            )
+            stack.name = "sector_anisotropy"
+
+            mean = stack.mean("sector", skipna=True, keep_attrs=True)
+            count = stack.count("sector")
+            mean.name = "sector_averaged_anisotropy"
+            count.name = "valid_sector_count"
+            mean.attrs = {
+                **mean.attrs,
+                "aggregation_method": "mean_sector_anisotropy",
+                "averaged_dimension": "sector",
+                "sector_weighting": "equal weight per non-NaN sector",
+            }
+            count.attrs = {
+                "description": "Number of non-NaN sector anisotropies used in the sector mean",
+            }
+
+            averaged_results[mode][pair_id] = {
+                "sector_anisotropy": stack,
+                "anisotropy": mean,
+                "valid_sector_count": count,
+            }
+
+    return averaged_results
+
+
+def calculate_global_intensity_ratio(pointwise_results):
+    """Pool stitched intensities over chi, then calculate anisotropy."""
+    global_results = {}
+
+    for mode, pair_results in pointwise_results.items():
+        global_results[mode] = {}
+
+        for pair_id, result in pair_results.items():
+            parallel = result["parallel"]
+            perpendicular = result["perpendicular"]
+
+            for values in (parallel, perpendicular):
+                if set(values.dims) != {"energy", "chi", "q"}:
+                    raise ValueError(
+                        f"{mode}/{pair_id}: expected energy, chi, and q dimensions"
+                    )
+                if values.attrs.get("q_cap_applied") is not True:
+                    raise ValueError(
+                        f"{mode}/{pair_id}: rerun q-capped pointwise maps first"
+                    )
+
+            parallel, perpendicular = xr.align(
+                parallel.transpose("energy", "chi", "q"),
+                perpendicular.transpose("energy", "chi", "q"),
+                join="exact", copy=False,
+            )
+            valid = np.isfinite(parallel) & np.isfinite(perpendicular)
+            count = valid.sum("chi")
+
+            parallel_mean = parallel.where(valid).mean(
+                "chi", skipna=True, keep_attrs=True,
+            )
+            perpendicular_mean = perpendicular.where(valid).mean(
+                "chi", skipna=True, keep_attrs=True,
+            )
+            denominator = parallel_mean + perpendicular_mean
+            anisotropy = (
+                (parallel_mean - perpendicular_mean)
+                / denominator.where(denominator != 0)
+            )
+
+            parallel_mean.name = "global_parallel_intensity"
+            perpendicular_mean.name = "global_perpendicular_intensity"
+            anisotropy.name = "global_intensity_ratio_anisotropy"
+            count.name = "valid_chi_count"
+
+            metadata = {
+                "aggregation_method": "global_intensity_ratio",
+                "normalization_mode": mode,
+                "averaged_dimension": "chi",
+                "angular_weighting": "equal weight per jointly finite chi bin",
+                "source_product": "clean",
+                "q_cap_applied": True,
+            }
+            for values in (parallel_mean, perpendicular_mean, anisotropy):
+                values.attrs = {**values.attrs, **metadata}
+            count.attrs = {
+                "description": "Number of chi bins with finite parallel and perpendicular intensities",
+            }
+
+            global_results[mode][pair_id] = {
+                "parallel_intensity": parallel_mean,
+                "perpendicular_intensity": perpendicular_mean,
+                "anisotropy": anisotropy,
+                "valid_chi_count": count,
+            }
+
+    return global_results

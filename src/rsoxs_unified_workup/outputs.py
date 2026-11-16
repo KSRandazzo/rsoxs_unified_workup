@@ -242,18 +242,18 @@ def build_scan_products_dataset(scans):
 
 
 def build_sector_anisotropy_dataset(
-    anisotropy_results,
+    sector_anisotropy_results,
 ):
     """Collect every configured sector calculation."""
-    modes = list(anisotropy_results)
+    modes = list(sector_anisotropy_results)
 
     if not modes:
         raise ValueError("No anisotropy results supplied")
 
-    sector_ids = list(anisotropy_results[modes[0]])
+    sector_ids = list(sector_anisotropy_results[modes[0]])
 
     for mode in modes:
-        if list(anisotropy_results[mode]) != sector_ids:
+        if list(sector_anisotropy_results[mode]) != sector_ids:
             raise ValueError(
                 "Sector order differs between "
                 "normalization modes"
@@ -264,7 +264,7 @@ def build_sector_anisotropy_dataset(
 
         for mode in modes:
             sector_arrays = [
-                anisotropy_results[mode][sector_id][
+                sector_anisotropy_results[mode][sector_id][
                     key
                 ].expand_dims(sector=[sector_id])
                 for sector_id in sector_ids
@@ -285,7 +285,7 @@ def build_sector_anisotropy_dataset(
 
         return combined
 
-    first_mode = anisotropy_results[modes[0]]
+    first_mode = sector_anisotropy_results[modes[0]]
     dataset = xr.Dataset(
         {
             "parallel_intensity": stack_variable(
@@ -529,6 +529,89 @@ def build_pointwise_anisotropy_dataset(
     return dataset
 
 
+def build_averaged_anisotropy_dataset(
+    results,
+    pair_id,
+    variables,
+    method,
+):
+    """Stack one pair's averaged products without resampling."""
+    modes = ("full_ring", "half_ring")
+
+    if set(results) != set(modes):
+        raise ValueError(
+            f"{method}: both full_ring and half_ring results are required"
+        )
+
+    data_vars = {}
+    reference = None
+
+    for key in variables:
+        mode_arrays = []
+        source_attributes = {}
+
+        for mode in modes:
+            if pair_id not in results[mode]:
+                raise ValueError(f"{method}/{mode}: missing pair {pair_id}")
+
+            record = results[mode][pair_id]
+            if key not in record:
+                raise ValueError(f"{method}/{mode}/{pair_id}: missing {key}")
+
+            array = record[key]
+            if not isinstance(array, xr.DataArray):
+                raise TypeError(f"{method}/{key}: expected a DataArray")
+            if set(array.dims) != {"energy", "q"}:
+                raise ValueError(f"{method}/{key}: expected energy and q")
+
+            if key.startswith("valid_"):
+                if not np.issubdtype(array.dtype, np.integer):
+                    raise ValueError(f"{method}/{key}: counts must be integers")
+                if bool((array < 0).any().item()):
+                    raise ValueError(f"{method}/{key}: counts cannot be negative")
+
+            if reference is None:
+                reference = array
+            else:
+                _check_export_grid(
+                    array, reference, f"{method}/{mode}/{key}", ("energy", "q")
+                )
+
+            if mode_arrays and array.dtype != mode_arrays[0].dtype:
+                raise ValueError(f"{method}/{key}: dtypes differ between modes")
+
+            source_attributes[mode] = dict(array.attrs)
+            mode_arrays.append(
+                array.transpose("energy", "q").expand_dims(
+                    normalization_mode=[mode]
+                )
+            )
+
+        combined = xr.concat(
+            mode_arrays,
+            dim="normalization_mode",
+            join="exact",
+            coords="minimal",
+            compat="equals",
+            combine_attrs="drop_conflicts",
+        )
+        combined.name = key
+        combined.attrs["source_attributes_by_normalization_mode"] = (
+            source_attributes
+        )
+        data_vars[key] = combined
+
+    return xr.Dataset(
+        data_vars,
+        attrs={
+            "description": f"Averaged anisotropy: {method.replace('_', ' ')}",
+            "aggregation_method": method,
+            "source_product": "clean",
+            "q_cap_applied": True,
+        },
+    )
+
+
 def _check_export_grid(value, reference, label, dimensions):
     """Require matching native coordinates without resampling."""
     if isinstance(value, (dict, xr.Dataset)):
@@ -555,8 +638,11 @@ def _check_export_grid(value, reference, label, dimensions):
 def build_pair_workup_datasets(
     configuration,
     scans,
-    anisotropy_results,
+    sector_anisotropy_results,
     pointwise_anisotropy_results,
+    chi_averaged_pointwise_results,
+    sector_averaged_anisotropy_results,
+    global_intensity_ratio_results,
 ):
     """Build separate export datasets for each pair's native q grid."""
     mask_pairs = get_mask_pairs(configuration)
@@ -572,15 +658,15 @@ def build_pair_workup_datasets(
         )
 
     if (
-        not anisotropy_results
-        or set(anisotropy_results)
+        not sector_anisotropy_results
+        or set(sector_anisotropy_results)
         != set(pointwise_anisotropy_results)
     ):
         raise ValueError(
             "Sector and pointwise normalization modes do not match"
         )
 
-    for mode in anisotropy_results:
+    for mode in sector_anisotropy_results:
         if set(pointwise_anisotropy_results[mode]) != set(mask_pairs):
             raise ValueError(
                 f"Pointwise pairs do not match configuration in {mode}"
@@ -588,9 +674,39 @@ def build_pair_workup_datasets(
 
         if any(
             sector["pair_id"] not in mask_pairs
-            for sector in anisotropy_results[mode].values()
+            for sector in sector_anisotropy_results[mode].values()
         ):
             raise ValueError(f"Unknown sector pair in {mode}")
+
+    averaged_exports = {
+        "chi_averaged_pointwise_anisotropy": (
+            chi_averaged_pointwise_results,
+            ("anisotropy", "valid_chi_count"),
+            "mean_pointwise_anisotropy",
+        ),
+        "sector_averaged_anisotropy": (
+            sector_averaged_anisotropy_results,
+            ("anisotropy", "valid_sector_count"),
+            "mean_sector_anisotropy",
+        ),
+        "global_intensity_ratio_anisotropy": (
+            global_intensity_ratio_results,
+            (
+                "parallel_intensity",
+                "perpendicular_intensity",
+                "anisotropy",
+                "valid_chi_count",
+            ),
+            "global_intensity_ratio",
+        ),
+    }
+
+    for name, (results, _, _) in averaged_exports.items():
+        if set(results) != set(sector_anisotropy_results):
+            raise ValueError(f"{name}: normalization modes do not match")
+        for mode, pairs in results.items():
+            if set(pairs) != set(mask_pairs):
+                raise ValueError(f"{name}/{mode}: configured pairs do not match")
 
     datasets = {}
 
@@ -683,7 +799,7 @@ def build_pair_workup_datasets(
                 for sector_id, sector in results.items()
                 if sector["pair_id"] == pair_id
             }
-            for mode, results in anisotropy_results.items()
+            for mode, results in sector_anisotropy_results.items()
         }
 
         if any(
@@ -759,6 +875,14 @@ def build_pair_workup_datasets(
                 build_pointwise_anisotropy_dataset(pair_pointwise)
             ),
         }
+
+        for name, (results, variables, method) in averaged_exports.items():
+            pair_datasets[name] = build_averaged_anisotropy_dataset(
+                results=results,
+                pair_id=pair_id,
+                variables=variables,
+                method=method,
+            )
 
         for name, dataset in pair_datasets.items():
             _check_export_grid(
@@ -859,7 +983,7 @@ def build_manifest(configuration, datasets):
     git_status = _git_value("status", "--porcelain")
 
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "generated_at_utc": datetime.now(
             timezone.utc
         ).isoformat(),
@@ -934,9 +1058,12 @@ def _prepare_zarr_dataset(dataset):
 def save_workup_results(
     configuration,
     scans,
-    anisotropy_results,
+    sector_anisotropy_results,
     aggregate_anisotropy_results,
     pointwise_anisotropy_results,
+    chi_averaged_pointwise_results,
+    sector_averaged_anisotropy_results,
+    global_intensity_ratio_results,
     output_root=None,
     overwrite=False,
 ):
@@ -950,8 +1077,11 @@ def save_workup_results(
     datasets = build_pair_workup_datasets(
         configuration=configuration,
         scans=scans,
-        anisotropy_results=anisotropy_results,
+        sector_anisotropy_results=sector_anisotropy_results,
         pointwise_anisotropy_results=pointwise_anisotropy_results,
+        chi_averaged_pointwise_results=chi_averaged_pointwise_results,
+        sector_averaged_anisotropy_results=sector_averaged_anisotropy_results,
+        global_intensity_ratio_results=global_intensity_ratio_results,
     )
 
     scan_set_id = str(

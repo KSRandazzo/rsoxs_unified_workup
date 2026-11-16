@@ -1363,9 +1363,9 @@ def plot_flux_correction_review(scans, processing):
             plt.close(fig)
 
 
-def plot_anisotropy_review(
+def plot_sector_anisotropy_review(
     scans,
-    anisotropy_results,
+    sector_anisotropy_results,
     vmin=-0.05,
     vmax=0.05,
 ):
@@ -1373,7 +1373,7 @@ def plot_anisotropy_review(
     first_scan = next(iter(scans.values()))
 
     for mode, sector_results in (
-        anisotropy_results.items()
+        sector_anisotropy_results.items()
     ):
         sector_count = len(sector_results)
         column_count = min(4, sector_count)
@@ -1445,7 +1445,7 @@ def plot_anisotropy_review(
 def plot_anisotropy_sector_overlays(
     scans,
     configuration,
-    anisotropy_results,
+    sector_anisotropy_results,
     energy_value=None,
 ):
     """Overlay configured anisotropy sectors on detector frames."""
@@ -1454,7 +1454,7 @@ def plot_anisotropy_sector_overlays(
         int(record["scan_id"]): record
         for record in configuration["scans"]
     }
-    full_ring_sectors = anisotropy_results["full_ring"]
+    full_ring_sectors = sector_anisotropy_results["full_ring"]
 
     for pair in configuration["polarization_pairs"]:
         sectors = [
@@ -1738,9 +1738,16 @@ def plot_pointwise_anisotropy_review(
 
     for mode, pair_results in pointwise_results.items():
         for pair_id, result in pair_results.items():
+            pair_scan = next(
+                record
+                for record in scans.values()
+                if record["integration"]["mask_pair_id"] == pair_id
+            )
+            native_chi = pair_scan["integration"]["clean"]["chi"].values
+
             energies = result["anisotropy"].energy.values
             energy_indices = review_energy_indices(
-                first_scan,
+                pair_scan,
                 processing,
                 energies,
             )
@@ -1825,15 +1832,31 @@ def plot_pointwise_anisotropy_review(
                         vmax,
                         colorbar_label,
                     ) in zip(axes, panels):
+
+                        # Restore missing rows only in this plotting copy.
+                        # Exact reindexing adds NaNs, without interpolation.
+                        if not np.all(np.isin(data["chi"].values, native_chi)):
+                            raise ValueError(
+                                f"{pair_id}: plotted chi coordinates "
+                                "do not match the original integration grid"
+                            )
+
+                        plot_data = data.transpose("chi", "q").reindex(
+                            chi=native_chi
+                        )
+                        plot_cmap = plt.get_cmap(cmap).copy()
+                        plot_cmap.set_bad((0, 0, 0, 0))
+
                         image = axis.pcolormesh(
-                            data["q"],
-                            data["chi"],
-                            data,
+                            plot_data["q"],
+                            plot_data["chi"],
+                            plot_data,
                             shading="auto",
-                            cmap=cmap,
+                            cmap=plot_cmap,
                             vmin=vmin,
                             vmax=vmax,
                         )
+                        axis.set_ylim(-180, 180)
                         axis.set_title(title)
                         axis.set_xlabel("q (Å⁻¹)")
                         axis.set_ylabel("chi (degrees)")
@@ -1856,3 +1879,415 @@ def plot_pointwise_anisotropy_review(
 
                     plt.show()
                     plt.close(fig)
+
+
+def plot_chi_averaged_pointwise_review(
+    scans,
+    pointwise_results,
+    averaged_results,
+    processing,
+    anisotropy_limit=0.15,
+):
+    """Verify and review chi-averaged pointwise anisotropy per pair."""
+    for mode, pair_results in averaged_results.items():
+        for pair_id, result in pair_results.items():
+            scan_record = next(
+                record for record in scans.values()
+                if record["integration"]["mask_pair_id"] == pair_id
+            )
+            source = pointwise_results[mode][pair_id]["anisotropy"]
+            source = source.transpose("energy", "chi", "q")
+            mean = result["anisotropy"].transpose("energy", "q")
+            count = result["valid_chi_count"].transpose("energy", "q")
+
+            for coordinate in ("energy", "q"):
+                for product in (mean, count):
+                    np.testing.assert_array_equal(
+                        product[coordinate].values,
+                        source[coordinate].values,
+                    )
+
+            # Independent check: sum pointwise A, then divide by its count.
+            raw = source.values
+            valid = ~np.isnan(raw)
+            reference_count = valid.sum(axis=1)
+            total = np.sum(raw, axis=1, where=valid)
+            reference = np.divide(
+                total,
+                reference_count,
+                out=np.full(total.shape, np.nan, dtype=float),
+                where=reference_count > 0,
+            )
+            np.testing.assert_allclose(
+                mean.values, reference,
+                rtol=1e-12, atol=1e-12, equal_nan=True,
+            )
+            np.testing.assert_array_equal(count.values, reference_count)
+            print(
+                f"{mode}/{pair_id}: mean and contributing chi counts "
+                "match the original pointwise values"
+            )
+
+            energy_indices = review_energy_indices(
+                scan_record, processing, mean.energy.values,
+            )
+
+            with plt.style.context("dark_background"):
+                fig, axes = plt.subplots(
+                    1, 3, figsize=(20, 5), constrained_layout=True,
+                )
+                image = axes[0].pcolormesh(
+                    mean.q.values, mean.energy.values, mean.values,
+                    shading="auto", cmap="coolwarm",
+                    vmin=-anisotropy_limit, vmax=anisotropy_limit,
+                )
+                axes[0].set_title("Mean pointwise A: all energies")
+                axes[0].set_ylabel("Energy (eV)")
+                fig.colorbar(image, ax=axes[0], label="Mean pointwise A")
+
+                for index in energy_indices:
+                    energy = float(mean.energy.values[index])
+                    line, = axes[1].plot(
+                        mean.q.values, mean.values[index],
+                        label=f"{energy:g} eV",
+                    )
+                    axes[1].plot(
+                        mean.q.values, reference[index],
+                        color=line.get_color(), linestyle=":", linewidth=2,
+                    )
+                    axes[2].plot(
+                        count.q.values, count.values[index],
+                        color=line.get_color(), label=f"{energy:g} eV",
+                    )
+
+                axes[1].axhline(
+                    0, color="gray", linestyle=":", linewidth=0.8,
+                )
+                axes[1].set_title(
+                    "Solid: result; dotted: independent mean"
+                )
+                axes[1].set_ylabel("Mean pointwise A")
+                axes[1].legend()
+
+                axes[2].set_title("Contributing angular bins")
+                axes[2].set_ylabel("Number of non-NaN chi bins")
+                axes[2].set_ylim(0, source.sizes["chi"] * 1.05)
+                axes[2].legend()
+
+                for axis in axes:
+                    axis.set_xlabel("q (Å⁻¹)")
+
+                fig.suptitle(
+                    f"Method 1: Mean pointwise anisotropy\n"
+                    f"{pair_id}; {mode.replace('_', ' ')}",
+                )
+                plt.show()
+                plt.close(fig)
+
+
+def plot_sector_averaged_anisotropy_review(
+    scans,
+    sector_anisotropy_results,
+    averaged_results,
+    processing,
+):
+    """Verify the sector mean and review its contributing sectors."""
+    for mode, pair_results in averaged_results.items():
+        for pair_id, result in pair_results.items():
+            scan_record = next(
+                record for record in scans.values()
+                if record["integration"]["mask_pair_id"] == pair_id
+            )
+            stack = result["sector_anisotropy"].transpose(
+                "energy", "sector", "q",
+            )
+            mean = result["anisotropy"].transpose("energy", "q")
+            count = result["valid_sector_count"].transpose("energy", "q")
+            source_sectors = {
+                sector_id: sector
+                for sector_id, sector in sector_anisotropy_results[mode].items()
+                if sector["pair_id"] == pair_id
+            }
+            if set(stack.sector.values) != set(source_sectors):
+                raise ValueError(f"{mode}/{pair_id}: sector IDs do not match")
+
+            for coordinate in ("energy", "q"):
+                for product in (mean, count):
+                    np.testing.assert_array_equal(
+                        product[coordinate].values, stack[coordinate].values,
+                    )
+                for sector in source_sectors.values():
+                    np.testing.assert_array_equal(
+                        sector["anisotropy"][coordinate].values,
+                        stack[coordinate].values,
+                    )
+
+            raw = np.stack(
+                [
+                    source_sectors[sector_id]["anisotropy"]
+                    .transpose("energy", "q").values
+                    for sector_id in stack.sector.values
+                ],
+                axis=1,
+            )
+            np.testing.assert_allclose(
+                stack.values, raw, rtol=1e-12, atol=1e-12, equal_nan=True,
+            )
+            valid = ~np.isnan(raw)
+            reference_count = valid.sum(axis=1)
+            total = np.sum(raw, axis=1, where=valid)
+            reference = np.divide(
+                total, reference_count,
+                out=np.full(total.shape, np.nan, dtype=float),
+                where=reference_count > 0,
+            )
+            np.testing.assert_allclose(
+                mean.values, reference,
+                rtol=1e-12, atol=1e-12, equal_nan=True,
+            )
+            np.testing.assert_array_equal(count.values, reference_count)
+            print(
+                f"{mode}/{pair_id}: sector values, mean, and counts "
+                "match the original sector results"
+            )
+
+            energy_indices = review_energy_indices(
+                scan_record, processing, mean.energy.values,
+            )
+            with plt.style.context("dark_background"):
+                fig, axes = plt.subplots(
+                    len(energy_indices), 2,
+                    figsize=(15, 4.5 * len(energy_indices)),
+                    squeeze=False, constrained_layout=True,
+                )
+                for row, index in enumerate(energy_indices):
+                    energy = float(mean.energy.values[index])
+                    curve_axis, count_axis = axes[row]
+
+                    for sector_index in range(stack.sizes["sector"]):
+                        curve_axis.plot(
+                            stack.q.values, stack.values[index, sector_index],
+                            label=str(stack.sector_label.values[sector_index]),
+                            alpha=0.75,
+                        )
+                    curve_axis.plot(
+                        mean.q.values, mean.values[index],
+                        color="white", linewidth=2.5, label="Sector mean",
+                    )
+                    curve_axis.axhline(
+                        0, color="gray", linestyle=":", linewidth=0.8,
+                    )
+                    curve_axis.set_title(f"Sector anisotropies: {energy:g} eV")
+                    curve_axis.set_ylabel("Anisotropy")
+                    curve_axis.legend()
+
+                    count_axis.step(
+                        count.q.values, count.values[index], where="mid",
+                    )
+                    count_axis.set_title(f"Contributing sectors: {energy:g} eV")
+                    count_axis.set_ylabel("Number of non-NaN sectors")
+                    count_axis.set_ylim(-0.1, stack.sizes["sector"] + 0.2)
+                    count_axis.set_yticks(range(stack.sizes["sector"] + 1))
+
+                    for axis in (curve_axis, count_axis):
+                        axis.set_xlabel("q (Å⁻¹)")
+
+                fig.suptitle(
+                    f"Method 2: Mean sector anisotropy\n"
+                    f"{pair_id}; {mode.replace('_', ' ')}",
+                )
+                plt.show()
+                plt.close(fig)
+
+
+def plot_global_intensity_ratio_review(
+    scans,
+    pointwise_results,
+    global_results,
+    processing,
+):
+    """Verify and review the global intensity-ratio calculation."""
+    for mode, pair_results in global_results.items():
+        for pair_id, result in pair_results.items():
+            scan_record = next(
+                record for record in scans.values()
+                if record["integration"]["mask_pair_id"] == pair_id
+            )
+            source = pointwise_results[mode][pair_id]
+            parallel = source["parallel"].transpose("energy", "chi", "q")
+            perpendicular = source["perpendicular"].transpose("energy", "chi", "q")
+            pooled_parallel = result["parallel_intensity"].transpose("energy", "q")
+            pooled_perpendicular = result["perpendicular_intensity"].transpose("energy", "q")
+            global_a = result["anisotropy"].transpose("energy", "q")
+            count = result["valid_chi_count"].transpose("energy", "q")
+
+            for coordinate in ("energy", "chi", "q"):
+                np.testing.assert_array_equal(
+                    parallel[coordinate].values, perpendicular[coordinate].values,
+                )
+            for coordinate in ("energy", "q"):
+                for product in (
+                    pooled_parallel, pooled_perpendicular, global_a,
+                    count,
+                ):
+                    np.testing.assert_array_equal(
+                        product[coordinate].values, parallel[coordinate].values,
+                    )
+
+            p = parallel.values
+            s = perpendicular.values
+            valid = np.isfinite(p) & np.isfinite(s)
+            reference_count = valid.sum(axis=1)
+            references = []
+            for raw in (p, s):
+                total = np.sum(raw, axis=1, where=valid)
+                references.append(np.divide(
+                    total, reference_count,
+                    out=np.full(total.shape, np.nan, dtype=float),
+                    where=reference_count > 0,
+                ))
+            p_reference, s_reference = references
+            denominator = p_reference + s_reference
+            a_reference = np.divide(
+                p_reference - s_reference, denominator,
+                out=np.full(denominator.shape, np.nan, dtype=float),
+                where=denominator != 0,
+            )
+            for product, reference in zip(
+                (pooled_parallel, pooled_perpendicular, global_a),
+                (p_reference, s_reference, a_reference),
+            ):
+                np.testing.assert_allclose(
+                    product.values, reference,
+                    rtol=1e-12, atol=1e-12, equal_nan=True,
+                )
+            np.testing.assert_array_equal(count.values, reference_count)
+            print(
+                f"{mode}/{pair_id}: pooled intensities, global ratio, "
+                "and counts match the original stitched intensities"
+            )
+
+            energy_indices = review_energy_indices(
+                scan_record, processing, global_a.energy.values,
+            )
+            with plt.style.context("dark_background"):
+                fig, axes = plt.subplots(
+                    len(energy_indices), 3,
+                    figsize=(20, 4.5 * len(energy_indices)),
+                    squeeze=False, constrained_layout=True,
+                )
+                for row, index in enumerate(energy_indices):
+                    energy = float(global_a.energy.values[index])
+                    intensity_axis, anisotropy_axis, count_axis = axes[row]
+
+                    intensity_axis.plot(
+                        global_a.q.values, pooled_parallel.values[index],
+                        label="Pooled parallel",
+                    )
+                    intensity_axis.plot(
+                        global_a.q.values, pooled_perpendicular.values[index],
+                        label="Pooled perpendicular",
+                    )
+                    intensity_axis.set_ylabel("Mean normalized intensity")
+                    intensity_axis.set_title(f"Pooled intensities: {energy:g} eV")
+                    intensity_axis.legend()
+
+                    line, = anisotropy_axis.plot(
+                        global_a.q.values, global_a.values[index],
+                        label="Global intensity ratio",
+                    )
+                    anisotropy_axis.plot(
+                        global_a.q.values, a_reference[index],
+                        color=line.get_color(), linestyle=":", linewidth=2,
+                        label="Independent reference",
+                    )
+                    anisotropy_axis.axhline(
+                        0, color="gray", linestyle=":", linewidth=0.8,
+                    )
+                    anisotropy_axis.set_ylabel("Anisotropy")
+                    anisotropy_axis.set_title(f"Global anisotropy: {energy:g} eV")
+                    anisotropy_axis.legend()
+
+                    count_axis.step(
+                        count.q.values, count.values[index], where="mid",
+                    )
+                    count_axis.set_ylabel("Jointly finite chi bins")
+                    count_axis.set_title(f"Contributing bins: {energy:g} eV")
+                    count_axis.set_ylim(-0.1, parallel.sizes["chi"] * 1.05)
+
+                    for axis in axes[row]:
+                        axis.set_xlabel("q (Å⁻¹)")
+
+                fig.suptitle(
+                    f"Method 3: Global intensity-ratio anisotropy\n"
+                    f"{pair_id}; {mode.replace('_', ' ')}",
+                )
+                plt.show()
+                plt.close(fig)
+
+
+def plot_anisotropy_method_comparison(
+    scans,
+    pointwise_averaged_results,
+    sector_averaged_results,
+    global_results,
+    processing,
+):
+    """Compare the three methods without mixing normalization modes or pairs."""
+    methods = [
+        ("1: Mean pointwise A", pointwise_averaged_results),
+        ("2: Mean sector A", sector_averaged_results),
+        ("3: Global intensity ratio", global_results),
+    ]
+
+    for mode, pair_results in global_results.items():
+        for label, results in methods:
+            if mode not in results or set(results[mode]) != set(pair_results):
+                raise ValueError(f"{label}: pair IDs do not match for {mode}")
+
+        for pair_id in pair_results:
+            scan_record = next(
+                record for record in scans.values()
+                if record["integration"]["mask_pair_id"] == pair_id
+            )
+            curves = [
+                (label, results[mode][pair_id]["anisotropy"].transpose("energy", "q"))
+                for label, results in methods
+            ]
+            reference = curves[-1][1]
+
+            for _, values in curves:
+                for coordinate in ("energy", "q"):
+                    np.testing.assert_array_equal(
+                        values[coordinate].values, reference[coordinate].values,
+                    )
+
+            energy_indices = review_energy_indices(
+                scan_record, processing, reference.energy.values,
+            )
+            with plt.style.context("dark_background"):
+                fig, axes = plt.subplots(
+                    1, len(energy_indices),
+                    figsize=(7 * len(energy_indices), 5),
+                    squeeze=False, constrained_layout=True,
+                )
+                for axis, index in zip(axes[0], energy_indices):
+                    energy = float(reference.energy.values[index])
+                    for label, values in curves:
+                        axis.plot(
+                            values.q.values, values.values[index], label=label,
+                        )
+                    axis.axhline(
+                        0, color="gray", linestyle=":", linewidth=0.8,
+                    )
+                    axis.set_title(f"Energy={energy:g} eV")
+                    axis.set_xlabel("q (Å⁻¹)")
+                    axis.set_ylabel("Anisotropy")
+                    axis.legend()
+
+                fig.suptitle(
+                    f"Comparison of anisotropy methods\n"
+                    f"{pair_id}; {mode.replace('_', ' ')}",
+                )
+                plt.show()
+                plt.close(fig)
