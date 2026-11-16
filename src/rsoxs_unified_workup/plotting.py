@@ -2291,3 +2291,126 @@ def plot_anisotropy_method_comparison(
                 )
                 plt.show()
                 plt.close(fig)
+
+
+def plot_ring_mean_intensity_review(scans, processing, vmin=None, vmax=None):
+    """Verify and plot flux-corrected full- and half-ring mean intensities."""
+    from rsoxs_unified_workup.normalization import select_chi_region
+
+    modes = ("full_ring", "half_ring")
+    positive_minima, positive_maxima = [], []
+
+    for polarization, record in scans.items():
+        result = record["intensity"]
+        source = record["flux_correction"]["flux_corrected"].transpose(
+            "energy", "chi", "q"
+        )
+        q_cap = record["integration"]["q_cap"]
+
+        for mode in modes:
+            mean = result[f"{mode}_mean"].transpose("energy", "q")
+            count = result[f"{mode}_valid_chi_count"].transpose("energy", "q")
+            for coordinate in ("energy", "q"):
+                for product in (mean, count):
+                    np.testing.assert_array_equal(
+                        product[coordinate].values, source[coordinate].values
+                    )
+            np.testing.assert_array_equal(q_cap.energy.values, source.energy.values)
+
+            region = source
+            if mode == "half_ring":
+                region = select_chi_region(
+                    source, result["half_ring_center_degrees"],
+                    result["half_ring_halfwidth_degrees"],
+                )
+
+            # Check one energy at a time to avoid another large image stack.
+            for index in range(source.sizes["energy"]):
+                raw = region.isel(energy=index).values
+                valid = np.isfinite(raw) & (
+                    source.q.values <= float(q_cap.isel(energy=index).item())
+                )
+                expected_count = valid.sum(axis=0)
+                total = np.sum(raw, axis=0, where=valid)
+                expected_mean = np.divide(
+                    total, expected_count,
+                    out=np.full(total.shape, np.nan, dtype=float),
+                    where=expected_count > 0,
+                )
+                np.testing.assert_array_equal(count.values[index], expected_count)
+                np.testing.assert_allclose(
+                    mean.values[index], expected_mean,
+                    rtol=1e-12, atol=1e-12, equal_nan=True,
+                )
+
+            positive = mean.values[np.isfinite(mean.values) & (mean.values > 0)]
+            if positive.size:
+                positive_minima.append(float(positive.min()))
+                positive_maxima.append(float(positive.max()))
+
+        print(f"{polarization}°: both ring means and contributing counts verified")
+
+    if not positive_minima:
+        raise ValueError("No positive ring-mean intensities are available for log plots")
+    vmin = min(positive_minima) if vmin is None else float(vmin)
+    if vmax is None:
+        vmax = max(positive_maxima)
+        if vmax == vmin:
+            vmax = vmin * 10
+    vmax = float(vmax)
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or not 0 < vmin < vmax:
+        raise ValueError("Log-plot limits must satisfy 0 < vmin < vmax")
+
+    norm = LogNorm(vmin=vmin, vmax=vmax)
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad("gray", alpha=0.25)
+
+    for polarization, record in scans.items():
+        result = record["intensity"]
+        indices = review_energy_indices(
+            record, processing, result["full_ring_mean"].energy.values
+        )
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                2, 2, figsize=(15, 10), constrained_layout=True
+            )
+            for column, mode in enumerate(modes):
+                values = result[f"{mode}_mean"].transpose("energy", "q")
+                raw = values.values
+                displayed = np.where(np.isfinite(raw) & (raw > 0), raw, np.nan)
+                omitted = int(np.sum(np.isfinite(raw) & (raw <= 0)))
+                print(f"{polarization}°/{mode}: {omitted} nonpositive means omitted from log plots")
+
+                image = axes[0, column].pcolormesh(
+                    values.q.values, values.energy.values, displayed,
+                    shading="auto", cmap=cmap, norm=norm,
+                )
+                title = mode.replace("_", " ").title()
+                axes[0, column].set_title(f"{title}: all energies")
+                axes[0, column].set_ylabel("Energy (eV)")
+
+                for index in indices:
+                    axes[1, column].plot(
+                        values.q.values, displayed[index],
+                        label=f"{float(values.energy.values[index]):g} eV",
+                    )
+                axes[1, column].set_title(f"{title}: selected energies")
+                axes[1, column].set_yscale("log")
+                axes[1, column].set_ylim(vmin, vmax)
+                axes[1, column].set_ylabel("Mean intensity / Au mesh current")
+                axes[1, column].legend()
+
+            for axis in axes.flat:
+                axis.set_xlabel("q (Å⁻¹)")
+            fig.colorbar(
+                image, ax=list(axes[0]),
+                label="Mean intensity / Au mesh current",
+            )
+            fig.suptitle(
+                f"Flux-corrected ring-mean intensity: polarization={polarization}°\n"
+                f"Scan {record['scan_id']}: {record['sample_name']}\n"
+                "Q capped; no ring normalization; logarithmic display"
+            )
+            plt.show()
+            plt.close(fig)

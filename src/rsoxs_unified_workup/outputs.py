@@ -157,6 +157,97 @@ def build_detector_image_dataset(scan_record, key):
     return dataset
 
 
+def build_ring_mean_intensity_dataset(scans):
+    """Export both flux-corrected ring means and their finite-chi counts."""
+    if not scans:
+        raise ValueError("No scans supplied for ring-mean intensity export")
+
+    keys = (
+        "full_ring_mean",
+        "half_ring_mean",
+        "full_ring_valid_chi_count",
+        "half_ring_valid_chi_count",
+    )
+    reference = next(iter(scans.values()))["integration"]["clean"]
+    arrays = {key: [] for key in keys}
+    attributes = {key: {} for key in keys}
+    metadata = {}
+
+    for polarization in sorted(scans, key=float):
+        record = scans[polarization]
+        result = record.get("intensity", {})
+        label = f"Scan {record['scan_id']} ring-mean intensity"
+        if any(key not in result for key in keys):
+            raise ValueError(f"{label}: rerun the intensity-calculation cell")
+
+        required = {
+            "source_product": "flux_correction.flux_corrected",
+            "flux_correction_applied": True,
+            "ring_normalization_applied": False,
+            "q_cap_applied": True,
+        }
+        if any(result.get(key) != value for key, value in required.items()):
+            raise ValueError(f"{label}: missing or incorrect correction metadata")
+
+        _check_export_grid(result, reference, label, ("energy", "q"))
+        q_cap = record["integration"]["q_cap"]
+        _check_export_grid(q_cap, reference, label, ("energy",))
+        pol = _polarization_value(polarization)
+        metadata[str(pol)] = {
+            key: value for key, value in result.items()
+            if not isinstance(value, xr.DataArray)
+        }
+
+        for mode in ("full_ring", "half_ring"):
+            mean = result[f"{mode}_mean"]
+            count = result[f"{mode}_valid_chi_count"]
+            for array in (mean, count):
+                if not isinstance(array, xr.DataArray):
+                    raise TypeError(f"{label}/{mode}: expected DataArrays")
+                if set(array.dims) != {"energy", "q"}:
+                    raise ValueError(f"{label}/{mode}: expected energy and q")
+            if not np.issubdtype(count.dtype, np.integer):
+                raise ValueError(f"{label}/{mode}: chi counts must be integers")
+            if bool((count < 0).any().item()):
+                raise ValueError(f"{label}/{mode}: chi counts cannot be negative")
+            if bool(np.isinf(mean).any().item()):
+                raise ValueError(f"{label}/{mode}: intensity cannot contain infinities")
+            if not bool((mean.isnull() == (count == 0)).all().item()):
+                raise ValueError(f"{label}/{mode}: means and chi counts disagree")
+            above_cap = mean.q > q_cap
+            if bool((above_cap & (mean.notnull() | (count != 0))).any().item()):
+                raise ValueError(f"{label}/{mode}: valid values exceed the q cap")
+
+        for key in keys:
+            array = result[key]
+            if arrays[key] and array.dtype != arrays[key][0].dtype:
+                raise ValueError(f"{label}/{key}: dtypes differ between scans")
+            attributes[key][str(pol)] = dict(array.attrs)
+            arrays[key].append(
+                array.transpose("energy", "q").expand_dims(polarization=[pol])
+            )
+
+    data_vars = {}
+    for key in keys:
+        combined = xr.concat(
+            arrays[key], dim="polarization", join="exact",
+            coords="minimal", compat="equals", combine_attrs="drop_conflicts",
+        )
+        combined.name = key
+        combined.attrs["source_attributes_by_polarization"] = attributes[key]
+        data_vars[key] = combined
+
+    return xr.Dataset(
+        data_vars,
+        attrs={
+            "description": "Flux-corrected full- and half-ring mean intensities",
+            **required,
+            "angular_reduction": "equal weight per finite chi bin",
+            "source_intensity_metadata_by_polarization": metadata,
+        },
+    )
+
+
 def build_scan_products_dataset(scans):
     """Collect final and diagnostic products from nested scan records."""
     if not scans:
@@ -761,8 +852,8 @@ def build_pair_workup_datasets(
                 ),
             }
 
-            for section in ("integration", "dark_integration"):
-                result = record[section]
+            for section in ("integration", "dark_integration", "intensity"):
+                result = record.get(section, {})
 
                 if any(
                     result.get(key) != value
@@ -774,11 +865,23 @@ def build_pair_workup_datasets(
                         "Recalculate it before exporting."
                     )
 
+            for key in (
+                "half_ring_center_degrees", "half_ring_halfwidth_degrees",
+            ):
+                if record["intensity"].get(key) != float(
+                    processing["normalization"][key]
+                ):
+                    raise ValueError(
+                        f"Scan {record['scan_id']} has stale intensity settings. "
+                        "Rerun the intensity-calculation cell before exporting."
+                    )
+
             for section in (
                 "integration",
                 "dark_integration",
                 "normalization",
                 "flux_correction",
+                "intensity",
             ):
                 _check_export_grid(
                     record[section],
@@ -868,6 +971,15 @@ def build_pair_workup_datasets(
 
         pair_datasets = {
             "scan_products": products,
+            "ring_mean_intensity": build_ring_mean_intensity_dataset(
+                pair_scans
+            ).assign_coords({
+                name: products[name]
+                for name in (
+                    "scan_id", "beam_center_x", "beam_center_y",
+                    "mask_id", "beam_center_pass_id",
+                )
+            }),
             "sector_anisotropy": (
                 build_sector_anisotropy_dataset(pair_sectors)
             ),
@@ -983,7 +1095,7 @@ def build_manifest(configuration, datasets):
     git_status = _git_value("status", "--porcelain")
 
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "generated_at_utc": datetime.now(
             timezone.utc
         ).isoformat(),
