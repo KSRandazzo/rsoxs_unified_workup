@@ -29,3 +29,12 @@ ksr219_2026apr_longC_01,ksr219,long,C,No beam decay,319665,2026-1,4adc,separate_
 ksr219_2026apr_repeats_01,ksr219,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
 ksr219alt_2026apr_longC_01,ksr219alt,long,C,No beam decay,319665,2026-1,4adc,separate_runs
 ksr219alt_2026apr_repeats_01,ksr219alt,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+DS_EB1A_2023jul_longO_01,DS_EB1A,long,O,No beam decay,312604,2023-2,4adc,within_run
+DS_EB1B_2023jul_longC_01,DS_EB1B,long,C,No beam decay,312604,2023-2,4adc,within_run
+DS_EB1B_2023jul_longO_01,DS_EB1B,long,O,No beam decay,312604,2023-2,4adc,within_run
+DS_EB2A_2023jul_longC_01,DS_EB2A,long,C,No beam decay,312604,2023-2,4adc,within_run
+DS_EB2A_2023jul_longO_01,DS_EB2A,long,O,No beam decay,312604,2023-2,4adc,within_run
+DS_EB2B_2023jul_longC_01,DS_EB2B,long,C,No beam decay,312604,2023-2,4adc,within_run
+DS_EB2B_2023jul_longO_01,DS_EB2B,long,O,No beam decay,312604,2023-2,4adc,within_run
+DS_EB2C_2023jul_longC_01,DS_EB2C,long,C,No beam decay,312604,2023-2,4adc,within_run
+DS_EB2C_2023jul_longO_01,DS_EB2C,long,O,No beam decay,312604,2023-2,4adc,within_run
