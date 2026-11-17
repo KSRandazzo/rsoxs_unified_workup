@@ -2414,3 +2414,783 @@ def plot_ring_mean_intensity_review(scans, processing, vmin=None, vmax=None):
             )
             plt.show()
             plt.close(fig)
+
+
+def plot_angular_anisotropy_fit_review(
+    fit_results,
+    normalization_mode="half_ring",
+):
+    """Review one angular fit per pair, with measured points and residuals."""
+    if normalization_mode not in fit_results:
+        raise ValueError(f"No angular fits exist for {normalization_mode}")
+
+    for pair_id, result in fit_results[normalization_mode].items():
+        observed = result["observed"]
+        fitted = result["fitted"]
+        residual = result["residual"]
+        used = result["fit_mask"].values
+        coefficients = result["coefficients"]
+        chi = observed.chi.values
+
+        for array in (fitted, residual, result["fit_mask"]):
+            np.testing.assert_array_equal(array.chi.values, chi)
+        np.testing.assert_array_equal(used, np.isfinite(observed.values))
+        if int(used.sum()) != result["valid_chi_count"]:
+            raise ValueError("The angular fit's finite-bin count is inconsistent")
+
+        def evaluate(angles):
+            phase = 2 * np.pi * np.asarray(angles) / result["period_degrees"]
+            values = np.full(phase.shape, float(coefficients.sel(term="offset").item()))
+            for harmonic in range(1, result["harmonics"] + 1):
+                values += (
+                    float(coefficients.sel(term=f"cos_{harmonic}").item())
+                    * np.cos(harmonic * phase)
+                    + float(coefficients.sel(term=f"sin_{harmonic}").item())
+                    * np.sin(harmonic * phase)
+                )
+            return values
+
+        np.testing.assert_allclose(
+            fitted.values, evaluate(chi), rtol=1e-12, atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            residual.values[used],
+            observed.values[used] - fitted.values[used],
+            rtol=1e-12, atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            result["rmse"], np.sqrt(np.mean(residual.values[used] ** 2)),
+            rtol=1e-12, atol=1e-12,
+        )
+        curve = result["model_curve"]
+        np.testing.assert_allclose(
+            curve.values, evaluate(curve.chi_model.values),
+            rtol=1e-12, atol=1e-12,
+        )
+        parameter_text = ""
+        model_label = "Fourier model (also predicts across gaps)"
+        if result["harmonics"] == 1:
+            parameters = result.get("sinusoid_parameters")
+            if parameters is None:
+                raise ValueError(
+                    "The sinusoid parameters are missing. "
+                    "Reload angular_fit and rerun the angular-fitting calculation."
+                )
+            offset = parameters["offset"]
+            amplitude = parameters["amplitude"]
+            phase_shift = parameters["phase_shift_degrees"]
+            np.testing.assert_allclose(
+                offset, coefficients.sel(term="offset").item(),
+                rtol=1e-12, atol=1e-12,
+            )
+            np.testing.assert_allclose(
+                amplitude,
+                np.hypot(
+                    coefficients.sel(term="cos_1").item(),
+                    coefficients.sel(term="sin_1").item(),
+                ),
+                rtol=1e-12, atol=1e-12,
+            )
+            if parameters["phase_defined"]:
+                if not 0 <= phase_shift < result["period_degrees"]:
+                    raise ValueError("The fitted phase shift is outside its period")
+                reconstructed = offset + amplitude * np.cos(
+                    2 * np.pi * (chi - phase_shift) / result["period_degrees"]
+                )
+                np.testing.assert_allclose(
+                    reconstructed, fitted.values, rtol=1e-12, atol=1e-12,
+                )
+                phase_text = f"{phase_shift:.6g}° (modulo {result['period_degrees']:g}°)"
+            else:
+                if amplitude > parameters["phase_zero_amplitude_threshold"]:
+                    raise ValueError("The fitted phase-defined flag is inconsistent")
+                phase_text = "undefined: fitted amplitude is numerically zero"
+            print(f"\n{normalization_mode}/{pair_id}")
+            print(f"  Fixed period: {result['period_degrees']:g}°; single sinusoid")
+            print(f"  Fitted offset: {offset:.8g}")
+            print(f"  Fitted amplitude: {amplitude:.8g}")
+            print(f"  Fitted phase shift: {phase_text}")
+            print(f"  RMSE: {result['rmse']:.6g}; R²: {result['r_squared']:.6g}")
+            parameter_text = (
+                f"\nOffset={offset:.5g}; amplitude={amplitude:.5g}; "
+                f"phase shift={phase_text}"
+            )
+            model_label = "Fitted sinusoid (also predicts across gaps)"
+        print(f"{normalization_mode}/{pair_id}: model and residual checks passed")
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                2, 1, figsize=(12, 8), sharex=True,
+                gridspec_kw={"height_ratios": [3, 1]},
+                constrained_layout=True,
+            )
+            axes[0].scatter(
+                chi[used], observed.values[used],
+                s=14, color="white",
+                label=f"Measured A: mean of {result['q_bins']} q bins",
+            )
+            axes[0].plot(
+                curve.chi_model.values, curve.values,
+                color="orange", linewidth=2,
+                label=model_label,
+            )
+            axes[0].set_ylabel("Pointwise anisotropy A")
+            axes[0].legend()
+
+            axes[1].scatter(
+                chi[used], residual.values[used], s=14, color="cyan",
+            )
+            axes[1].axhline(0, color="gray", linestyle=":", linewidth=1)
+            axes[1].set_ylabel("Data − fit")
+            axes[1].set_xlabel("Chi (degrees)")
+            axes[1].set_xlim(-180, 180)
+            axes[1].set_xticks(np.arange(-180, 181, 45))
+
+            fig.suptitle(
+                f"Angular anisotropy fit: {pair_id}\n"
+                f"{normalization_mode.replace('_', ' ')} normalization; "
+                f"E={result['selected_energy_ev']:g} eV; "
+                f"q center={result['selected_q']:.8g} Å⁻¹\n"
+                f"Mean over {result['q_bins']} q bins; "
+                f"q-bin centers={result['selected_q_values'][0]:.8g} to "
+                f"{result['selected_q_values'][-1]:.8g} Å⁻¹\n"
+                f"Fixed period={result['period_degrees']:g}°; "
+                f"harmonics={result['harmonics']}; "
+                f"finite bins={result['valid_chi_count']}; "
+                f"RMSE={result['rmse']:.4g}; R²={result['r_squared']:.4g}"
+                f"{parameter_text}"
+            )
+            plt.show()
+            plt.close(fig)
+
+
+def plot_angular_model_comparison_review(
+    comparisons,
+    normalization_mode="half_ring",
+    top_n=5,
+):
+    """Print candidate rankings and review the lowest-BIC model per pair."""
+    if normalization_mode not in comparisons:
+        raise ValueError(f"No angular comparisons exist for {normalization_mode}")
+    if isinstance(top_n, bool) or not isinstance(top_n, (int, np.integer)) or top_n < 1:
+        raise ValueError("top_n must be a positive integer")
+
+    for pair_id, comparison in comparisons[normalization_mode].items():
+        result = comparison["best_fit"]
+        observed = result["observed"]
+        chi = np.asarray(observed.chi.values, dtype=float)
+        used = result["fit_mask"].values
+        coefficients = result["coefficients"]
+        curve = result["model_curve"]
+
+        np.testing.assert_array_equal(used, np.isfinite(observed.values))
+        for array in (result["fitted"], result["residual"], result["fit_mask"]):
+            np.testing.assert_array_equal(array.chi.values, chi)
+
+        def evaluate(angles):
+            angles = np.asarray(angles, dtype=float)
+            values = np.full(
+                angles.shape, float(coefficients.sel(term="offset").item())
+            )
+            if result["harmonics"] > 0:
+                phase = 2 * np.pi * angles / result["period_degrees"]
+                for harmonic in range(1, result["harmonics"] + 1):
+                    values += (
+                        float(coefficients.sel(term=f"cos_{harmonic}").item())
+                        * np.cos(harmonic * phase)
+                        + float(coefficients.sel(term=f"sin_{harmonic}").item())
+                        * np.sin(harmonic * phase)
+                    )
+            return values
+
+        np.testing.assert_allclose(
+            result["fitted"].values, evaluate(chi), rtol=1e-12, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            curve.values, evaluate(curve.chi_model.values), rtol=1e-12, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            result["residual"].values[used],
+            observed.values[used] - result["fitted"].values[used],
+            rtol=1e-12, atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            result["rmse"],
+            np.sqrt(np.mean(result["residual"].values[used] ** 2)),
+            rtol=1e-12, atol=1e-12,
+        )
+
+        print(f"\n{normalization_mode}/{pair_id}")
+        print("  Lower BIC is preferred; delta BIC is relative to the best model.")
+        print(f"  {'Model':<23} {'Params':>6} {'RMSE':>11} {'R2':>9} {'BIC':>12} {'Delta BIC':>10}")
+        for row in comparison["ranking"][:int(top_n)]:
+            print(
+                f"  {row['model_name']:<23} {row['parameter_count']:>6d} "
+                f"{row['rmse']:>11.5g} {row['r_squared']:>9.4g} "
+                f"{row['bic']:>12.3f} {row['delta_bic']:>10.3f}"
+            )
+        print(
+            f"  Best: {result['model_name']}; "
+            f"BIC improvement over constant={result['delta_bic_vs_constant']:.3f}; "
+            f"runner-up gap={result['runner_up_delta_bic']:.3f}"
+        )
+        if result["harmonics"] == 0:
+            print("  No tested periodic model is preferred over the constant baseline.")
+        if comparison["failed_models"]:
+            print(f"  Skipped {len(comparison['failed_models'])} unidentifiable models.")
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                2, 1, figsize=(12, 8), sharex=True,
+                gridspec_kw={"height_ratios": [3, 1]},
+                constrained_layout=True,
+            )
+            axes[0].scatter(
+                chi[used], observed.values[used], s=14, color="white",
+                label=f"Measured A: mean of {result['q_bins']} q bins",
+            )
+            axes[0].plot(
+                curve.chi_model.values, curve.values,
+                color="orange", linewidth=2,
+                label=f"Lowest BIC: {result['model_name']} (predicts across gaps)",
+            )
+            axes[0].set_ylabel("Pointwise anisotropy A")
+            axes[0].legend()
+
+            axes[1].scatter(
+                chi[used], result["residual"].values[used], s=14, color="cyan",
+            )
+            axes[1].axhline(0, color="gray", linestyle=":", linewidth=1)
+            axes[1].set_ylabel("Data - fit")
+            axes[1].set_xlabel("Chi (degrees)")
+            axes[1].set_xlim(-180, 180)
+            axes[1].set_xticks(np.arange(-180, 181, 45))
+
+            fig.suptitle(
+                f"Angular model comparison: {pair_id}\n"
+                f"{normalization_mode.replace('_', ' ')} normalization; "
+                f"E={result['selected_energy_ev']:g} eV; "
+                f"mean of {result['q_bins']} q bins\n"
+                f"q-bin centers={result['selected_q_values'][0]:.8g} to "
+                f"{result['selected_q_values'][-1]:.8g} Å⁻¹\n"
+                f"Best tested model: {result['model_name']}; "
+                f"R2={result['r_squared']:.4g}; RMSE={result['rmse']:.4g}; "
+                f"BIC improvement over constant={result['delta_bic_vs_constant']:.2f}"
+            )
+            plt.show()
+            plt.close(fig)
+
+
+def plot_angular_anisotropy_input_review(
+    configuration,
+    scans,
+    reference_fits,
+    normalization_mode="half_ring",
+):
+    """Review fixed-polarization inputs and verify the fitted stitched profile."""
+    import xarray as xr
+    from rsoxs_unified_workup.anisotropy import (
+        NORMALIZATION_MODES,
+        assign_parallel_perpendicular,
+        pair_polarizations,
+    )
+    from rsoxs_unified_workup.normalization import select_chi_region
+
+    if normalization_mode not in NORMALIZATION_MODES:
+        raise ValueError(f"Unknown normalization mode: {normalization_mode}")
+    if normalization_mode not in reference_fits:
+        raise ValueError(f"No angular profiles exist for {normalization_mode}")
+
+    normalization_key = NORMALIZATION_MODES[normalization_mode]
+    settings = configuration["processing"]["angular_anisotropy_fit"]
+    pairs = {
+        pair["pair_id"]: pair for pair in configuration["polarization_pairs"]
+    }
+
+    for pair_id, reference in reference_fits[normalization_mode].items():
+        if pair_id not in pairs:
+            raise ValueError(f"{pair_id} is not in the current configuration")
+        if (
+            reference["requested_energy_ev"] != settings["energy_ev"]
+            or reference["requested_q"] != settings["q_value"]
+            or reference["q_bins"] != settings.get("q_bins", 1)
+        ):
+            raise ValueError(
+                "Angular profiles do not match the current TOML. "
+                "Rerun the angular-fitting calculation cell first."
+            )
+
+        pol_1, pol_2 = pair_polarizations(configuration, pairs[pair_id])
+        first = scans[pol_1]["normalization"][normalization_key]
+        second = scans[pol_2]["normalization"][normalization_key]
+        first, second = xr.align(first, second, join="exact", copy=False)
+        native_chi = first.chi.values
+        energy = reference["selected_energy_ev"]
+        q_values = np.asarray(reference["selected_q_values"], dtype=float)
+        selected_chi = reference["observed"].chi.values
+
+        for pol in (pol_1, pol_2):
+            cap = float(
+                scans[pol]["integration"]["q_cap"].sel(energy=energy).item()
+            )
+            if not np.isfinite(cap) or np.max(q_values) > cap:
+                raise ValueError(f"The selected q window exceeds the q cap for {pol}°")
+
+        first = first.sel(energy=energy, q=q_values, chi=selected_chi)
+        second = second.sel(energy=energy, q=q_values, chi=selected_chi)
+        denominator = first + second
+        fixed_ratio = (first - second) / denominator.where(denominator != 0)
+        complete = (
+            np.isfinite(first).all("q")
+            & np.isfinite(second).all("q")
+            & np.isfinite(fixed_ratio).all("q")
+        )
+
+        # Average pointwise ratios, not the ratio of q-averaged intensities.
+        fixed_mean = fixed_ratio.where(np.isfinite(fixed_ratio)).mean(
+            "q", skipna=False,
+        ).where(complete)
+        first_mean = first.mean("q", skipna=False).where(complete)
+        second_mean = second.mean("q", skipna=False).where(complete)
+
+        signs = xr.DataArray(
+            np.full(selected_chi.shape, np.nan),
+            dims=("chi",), coords={"chi": selected_chi},
+        )
+        for sector in configuration["anisotropy_sectors"]:
+            if sector["pair_id"] != pair_id:
+                continue
+            patch = select_chi_region(
+                signs,
+                center_degrees=sector["chi_center_deg"],
+                halfwidth_degrees=sector["chi_halfwidth_deg"],
+            )
+            selected = np.isin(selected_chi, patch.chi.values)
+            if np.any(np.isfinite(signs.values[selected])):
+                raise ValueError("Overlapping sectors in the current configuration")
+            parallel_pol, _ = assign_parallel_perpendicular(
+                sector["chi_center_deg"], pol_1, pol_2,
+            )
+            signs.values[selected] = 1 if parallel_pol == pol_1 else -1
+
+        if not np.all(np.isfinite(signs.values)):
+            raise ValueError(
+                "Current sectors do not cover the saved angular profile. "
+                "Recalculate pointwise anisotropy and angular fits."
+            )
+        reconstructed = fixed_mean * signs
+        saved = reference["observed"]
+        np.testing.assert_allclose(
+            reconstructed.values, saved.values,
+            rtol=1e-10, atol=1e-12, equal_nan=True,
+            err_msg=(
+                "The current normalized inputs and sector assignments do not "
+                "reproduce the fitted profile. Recalculate the downstream results."
+            ),
+        )
+        np.testing.assert_array_equal(
+            complete.values, np.isfinite(saved.values),
+        )
+
+        # Reindex display copies only, so lines never bridge omitted chi bins.
+        first_plot = first_mean.reindex(chi=native_chi)
+        second_plot = second_mean.reindex(chi=native_chi)
+        fixed_plot = fixed_mean.reindex(chi=native_chi)
+        saved_plot = saved.reindex(chi=native_chi)
+
+        print(f"\n{normalization_mode}/{pair_id}")
+        print(
+            f"  E={energy:g} eV; {reference['q_bins']} q bins: "
+            f"{q_values[0]:.8g} to {q_values[-1]:.8g} Å⁻¹ (bin centers)"
+        )
+        print(
+            f"  Fixed pol labels: numerator I({pol_1}°) - I({pol_2}°); "
+            f"complete chi bins={int(complete.sum().item())}"
+        )
+        print("  Sector sign changes reproduce the fitted stitched A: PASS")
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                2, 1, figsize=(12, 9), sharex=True,
+                constrained_layout=True,
+            )
+            axes[0].plot(
+                native_chi, first_plot.values,
+                color="cyan", marker=".", markersize=3, linewidth=0.7,
+                label=f"{pol_1}° normalized intensity: mean over q",
+            )
+            axes[0].plot(
+                native_chi, second_plot.values,
+                color="magenta", marker=".", markersize=3, linewidth=0.7,
+                label=f"{pol_2}° normalized intensity: mean over q",
+            )
+            axes[0].set_ylabel("Normalized intensity")
+            axes[0].legend()
+
+            axes[1].plot(
+                native_chi, fixed_plot.values,
+                color="cyan", marker=".", markersize=3, linewidth=0.7,
+                label=f"Fixed labels: mean_q[(I{pol_1} - I{pol_2})/(I{pol_1} + I{pol_2})]",
+            )
+            axes[1].plot(
+                native_chi, saved_plot.values,
+                color="orange", marker=".", markersize=3, linewidth=0.7,
+                label="Existing stitched A: pol roles change by sector",
+            )
+            axes[1].axhline(0, color="gray", linestyle=":", linewidth=1)
+            axes[1].set_ylabel("Anisotropy")
+            axes[1].set_xlabel("Chi (degrees)")
+            axes[1].set_xlim(-180, 180)
+            axes[1].set_xticks(np.arange(-180, 181, 45))
+            axes[1].legend()
+
+            fig.suptitle(
+                f"Angular inputs and sector stitching: {pair_id}\n"
+                f"{normalization_mode.replace('_', ' ')} normalization; "
+                f"E={energy:g} eV; mean of {reference['q_bins']} q bins\n"
+                f"q-bin centers={q_values[0]:.8g} to {q_values[-1]:.8g} Å⁻¹; "
+                "same complete chi support for all traces"
+            )
+            plt.show()
+            plt.close(fig)
+
+
+def plot_angular_waveform_comparison_review(
+    waveform_fits,
+    normalization_mode="half_ring",
+):
+    """Review the fixed-90-degree sinusoid and triangle on identical bins."""
+    import xarray as xr
+
+    if normalization_mode not in waveform_fits:
+        raise ValueError(f"No waveform fits exist for {normalization_mode}")
+    colors = {"sinusoid": "orange", "triangle": "magenta"}
+
+    for pair_id, comparison in waveform_fits[normalization_mode].items():
+        sinusoid = comparison["sinusoid"]
+        triangle = comparison["triangle"]
+        observed = sinusoid["observed"]
+        chi = np.asarray(observed.chi.values, dtype=float)
+        used = np.isfinite(observed.values)
+        xr.testing.assert_identical(observed, triangle["observed"])
+        for key in (
+            "selected_energy_ev", "selected_q", "q_bins",
+            "selected_q_values", "pair_q_cap",
+        ):
+            if sinusoid[key] != triangle[key]:
+                raise ValueError(f"The waveforms have different {key}")
+
+        for name, result in (("sinusoid", sinusoid), ("triangle", triangle)):
+            if result["period_degrees"] != 90.0 or result["parameter_count"] != 3:
+                raise ValueError("Use fixed-90-degree, three-parameter waveform fits")
+            if result.get("q_cap_applied") is not True:
+                raise ValueError("Use q-capped angular profiles")
+            for array in (result["fitted"], result["residual"], result["fit_mask"]):
+                np.testing.assert_array_equal(array.chi.values, chi)
+            np.testing.assert_array_equal(result["fit_mask"].values, used)
+            if result["valid_chi_count"] != int(used.sum()):
+                raise ValueError("The waveform finite-bin count is inconsistent")
+
+            parameters = result[f"{name}_parameters"]
+            offset, amplitude = parameters["offset"], parameters["amplitude"]
+            phase = parameters["phase_shift_degrees"]
+            if amplitude < 0:
+                raise ValueError("Waveform amplitudes must be nonnegative")
+            if parameters["phase_defined"] and not 0 <= phase < 90:
+                raise ValueError("Phase shifts must be in [0, 90) degrees")
+
+            def evaluate(angles):
+                angles = np.asarray(angles, dtype=float)
+                if name == "sinusoid":
+                    coefficients = result["coefficients"]
+                    return (
+                        coefficients.sel(term="offset").item()
+                        + coefficients.sel(term="cos_1").item() * np.cos(2 * np.pi * angles / 90)
+                        + coefficients.sel(term="sin_1").item() * np.sin(2 * np.pi * angles / 90)
+                    )
+                model_phase = phase if parameters["phase_defined"] else 0.0
+                distance = (angles - model_phase + 45.0) % 90.0 - 45.0
+                return offset + amplitude * (1.0 - 4.0 * np.abs(distance) / 90.0)
+
+            np.testing.assert_allclose(
+                result["fitted"].values, evaluate(chi), rtol=1e-12, atol=1e-12,
+            )
+            if name == "sinusoid" and parameters["phase_defined"]:
+                np.testing.assert_allclose(
+                    offset + amplitude * np.cos(2 * np.pi * (chi - phase) / 90),
+                    result["fitted"].values, rtol=1e-12, atol=1e-12,
+                )
+            curve = result["model_curve"]
+            np.testing.assert_allclose(
+                curve.values, evaluate(curve.chi_model.values), rtol=1e-12, atol=1e-12,
+            )
+            errors = observed.values[used] - result["fitted"].values[used]
+            np.testing.assert_allclose(
+                result["residual"].values[used], errors, rtol=1e-12, atol=1e-12,
+            )
+            if np.isfinite(result["residual"].values[~used]).any():
+                raise ValueError("Missing measured bins must not enter residuals")
+            np.testing.assert_allclose(
+                result["rmse"], np.sqrt(np.mean(errors ** 2)), rtol=1e-12, atol=1e-12,
+            )
+            np.testing.assert_allclose(
+                result["residual_sum_of_squares"], np.sum(errors ** 2),
+                rtol=1e-12, atol=1e-12,
+            )
+
+        minimum_bic = min(sinusoid["bic"], triangle["bic"])
+        print(f"\n{normalization_mode}/{pair_id}")
+        print(
+            f"  E={sinusoid['selected_energy_ev']:g} eV; "
+            f"{sinusoid['q_bins']} q bins: "
+            f"{sinusoid['selected_q_values'][0]:.8g} to "
+            f"{sinusoid['selected_q_values'][-1]:.8g} Å⁻¹"
+        )
+        print(f"  Both: period=90°; three fitted parameters; {int(used.sum())} identical finite chi bins")
+        print("  Model          Offset    Amplitude   Phase (deg)        RMSE       R²    Delta BIC")
+        for name, result in (("sinusoid", sinusoid), ("triangle", triangle)):
+            parameters = result[f"{name}_parameters"]
+            phase_text = (
+                f"{parameters['phase_shift_degrees']:.5g}"
+                if parameters["phase_defined"] else "undefined"
+            )
+            print(
+                f"  {name:<9} {parameters['offset']:11.5g} "
+                f"{parameters['amplitude']:12.5g} {phase_text:>13} "
+                f"{result['rmse']:11.5g} {result['r_squared']:8.4g} "
+                f"{result['bic'] - minimum_bic:12.3f}"
+            )
+        print("  Phase is the location of a maximum, modulo 90°. Amplitude is half the fitted peak-to-peak range.")
+        print("  Smaller RMSE/Delta BIC is preferred; angular correlation limits statistical interpretation.")
+        print("  Waveform reconstruction, common-bin, and residual checks passed.")
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(
+                3, 1, figsize=(12, 9), sharex=True,
+                gridspec_kw={"height_ratios": [3, 1, 1]},
+                constrained_layout=True,
+            )
+            axes[0].scatter(chi[used], observed.values[used], s=14, color="white", label="Measured A")
+            for index, (name, result) in enumerate((("sinusoid", sinusoid), ("triangle", triangle)), start=1):
+                curve = result["model_curve"]
+                axes[0].plot(
+                    curve.chi_model.values, curve.values, color=colors[name],
+                    linewidth=2, label=f"90° {name}: RMSE={result['rmse']:.4g}",
+                )
+                axes[index].scatter(
+                    chi[used], result["residual"].values[used], s=14, color=colors[name],
+                )
+                axes[index].axhline(0, color="gray", linestyle=":", linewidth=1)
+                axes[index].set_ylabel(f"{name.capitalize()}\ndata − fit")
+
+            residual_values = np.concatenate((
+                sinusoid["residual"].values[used], triangle["residual"].values[used],
+            ))
+            extent = max(float(np.max(np.abs(residual_values))), np.finfo(float).eps)
+            for axis in axes[1:]:
+                axis.set_ylim(-1.1 * extent, 1.1 * extent)
+            axes[0].set_ylabel("Sector-relative pointwise A")
+            axes[0].legend()
+            axes[-1].set_xlabel("Chi (degrees)")
+            axes[-1].set_xlim(-180, 180)
+            axes[-1].set_xticks(np.arange(-180, 181, 45))
+            fig.suptitle(
+                f"Fixed-90° sinusoid versus triangle: {pair_id}\n"
+                f"{normalization_mode.replace('_', ' ')} normalization; "
+                f"E={sinusoid['selected_energy_ev']:g} eV; mean of {sinusoid['q_bins']} q bins\n"
+                f"q-bin centers={sinusoid['selected_q_values'][0]:.8g} to "
+                f"{sinusoid['selected_q_values'][-1]:.8g} Å⁻¹; "
+                f"{int(used.sum())} common finite chi bins\n"
+                "Offset, amplitude, and phase fitted for each shape; curves predict across gaps only"
+            )
+            plt.show()
+            plt.close(fig)
+
+
+def plot_angular_anisotropy_map_review(
+    map_results,
+    normalization_mode="half_ring",
+    slice_fits=None,
+    amplitude_percentile=99.0,
+    offset_percentile=99.0,
+):
+    """Review maps with shared, display-only percentile color limits.
+
+    Amplitude spans zero to its requested percentile. Offset spans the
+    negative and positive requested percentile of its absolute magnitude.
+    Percentiles pool finite values across pairs in the selected normalization
+    mode. Set either percentile to 100 for full-range colors. Values outside
+    the limits retain their fitted values and use endpoint colors; no values
+    are removed, refitted, or filled.
+    """
+    for name, percentile in (
+        ("amplitude_percentile", amplitude_percentile),
+        ("offset_percentile", offset_percentile),
+    ):
+        if (
+            isinstance(percentile, (bool, np.bool_))
+            or not isinstance(percentile, (int, float, np.integer, np.floating))
+            or not np.isfinite(percentile)
+            or not 0 < percentile <= 100
+        ):
+            raise ValueError(f"{name} must be a finite number greater than 0 and at most 100")
+    if normalization_mode not in map_results or not map_results[normalization_mode]:
+        raise ValueError(f"No angular parameter maps exist for {normalization_mode}")
+    pairs = map_results[normalization_mode]
+    required = (
+        "offset", "amplitude", "phase_shift_degrees", "cos_coefficient",
+        "sin_coefficient", "rmse", "r_squared", "valid_chi_count",
+        "fit_status", "fit_success", "phase_defined", "window_eligible",
+    )
+    for pair_id, dataset in pairs.items():
+        if dataset.attrs.get("period_degrees") != 90 or dataset.attrs.get("q_cap_applied") is not True:
+            raise ValueError("Use fixed-90-degree, q-capped angular parameter maps")
+        for field in required:
+            if dataset[field].dims != ("energy", "q"):
+                raise ValueError(f"{pair_id}/{field}: expected energy and q dimensions")
+        success = dataset.fit_success.values
+        np.testing.assert_array_equal(success, dataset.fit_status.values == 0)
+        if np.any(success & ~dataset.window_eligible.values):
+            raise ValueError("A successful fit lies outside an eligible q window")
+        cap = dataset.pair_q_cap.values[:, None]
+        window_upper = dataset.q_window_upper.values[None, :]
+        if np.any(success & ~(window_upper <= cap)):
+            raise ValueError("A fitted q window exceeds its pair q cap")
+        if np.any(success & (dataset.valid_chi_count.values <= 3)):
+            raise ValueError("A successful fit has insufficient chi bins")
+        for field in ("offset", "amplitude", "rmse", "cos_coefficient", "sin_coefficient"):
+            if np.isfinite(dataset[field].values[~success]).any():
+                raise ValueError(f"{pair_id}/{field}: failed fits must remain NaN")
+            if not np.isfinite(dataset[field].values[success]).all():
+                raise ValueError(f"{pair_id}/{field}: successful fits must be finite")
+        np.testing.assert_allclose(
+            dataset.amplitude.values[success],
+            np.hypot(dataset.cos_coefficient.values[success], dataset.sin_coefficient.values[success]),
+            rtol=1e-12, atol=1e-12,
+        )
+        defined = dataset.phase_defined.values
+        np.testing.assert_array_equal(defined, np.isfinite(dataset.phase_shift_degrees.values))
+        if np.any(defined & ~success):
+            raise ValueError("Phase is marked defined for a failed fit")
+        phase = dataset.phase_shift_degrees.values[defined]
+        if np.any((phase < 0) | (phase >= 90)):
+            raise ValueError("Defined phases must be in [0, 90) degrees")
+        expected_phase = (
+            np.arctan2(dataset.sin_coefficient.values[defined], dataset.cos_coefficient.values[defined])
+            * 90 / (2 * np.pi)
+        ) % 90
+        phase_error = (phase - expected_phase + 45) % 90 - 45
+        np.testing.assert_allclose(phase_error, 0, rtol=0, atol=1e-10)
+
+        if slice_fits is not None:
+            reference = slice_fits[normalization_mode][pair_id]
+            if dataset.attrs["q_bins"] != reference["q_bins"]:
+                raise ValueError("The map and selected-slice fits use different q averaging")
+            point = dataset.sel(energy=reference["selected_energy_ev"], q=reference["selected_q"])
+            if not point.fit_success.item():
+                raise ValueError("The selected-slice reference is not fitted in the map")
+            parameters = reference["sinusoid_parameters"]
+            for field in ("offset", "amplitude"):
+                np.testing.assert_allclose(point[field].item(), parameters[field], rtol=1e-10, atol=1e-12)
+            for field in ("rmse", "r_squared"):
+                np.testing.assert_allclose(point[field].item(), reference[field], rtol=1e-10, atol=1e-12, equal_nan=True)
+            if point.valid_chi_count.item() != reference["valid_chi_count"]:
+                raise ValueError("The map and selected slice have different angular coverage")
+            if point.phase_defined.item() != parameters["phase_defined"]:
+                raise ValueError("The map and selected slice disagree about phase being defined")
+            if parameters["phase_defined"]:
+                error = (point.phase_shift_degrees.item() - parameters["phase_shift_degrees"] + 45) % 90 - 45
+                np.testing.assert_allclose(error, 0, rtol=0, atol=1e-8)
+            print(f"{normalization_mode}/{pair_id}: selected-slice parameters, coverage, and errors match the map")
+
+    def finite_max(field, absolute=False):
+        maximum = 0.0
+        for dataset in pairs.values():
+            values = dataset[field].values
+            values = values[np.isfinite(values)]
+            if values.size:
+                maximum = max(maximum, float(np.max(np.abs(values) if absolute else values)))
+        return maximum if maximum > 0 else 1.0
+
+    def percentile_limit(field, percentile, absolute=False):
+        finite = []
+        for dataset in pairs.values():
+            values = dataset[field].values
+            values = values[np.isfinite(values)]
+            if values.size:
+                finite.append(np.abs(values) if absolute else values)
+        if not finite:
+            return 1.0
+        values = np.concatenate(finite)
+        limit = float(np.percentile(values, percentile))
+        # Keep a nonzero color interval when the requested quantile is zero.
+        # Use the smallest positive value, or a neutral fallback for all zeros.
+        if limit <= 0:
+            positive = values[values > 0]
+            limit = float(positive.min()) if positive.size else 1.0
+        return limit
+
+    amplitude_max = percentile_limit("amplitude", amplitude_percentile)
+    offset_max = percentile_limit("offset", offset_percentile, absolute=True)
+    rmse_max = finite_max("rmse")
+    count_max = max(dataset.attrs["source_chi_bin_count"] for dataset in pairs.values())
+    print(f"\nShared display limits across {normalization_mode} pairs:")
+    print(f"  Amplitude: 0 to {amplitude_max:.6g} (percentile {amplitude_percentile:g})")
+    print(f"  Offset: {-offset_max:.6g} to {offset_max:.6g} (absolute-value percentile {offset_percentile:g})")
+    print("  Color saturation changes the display only; all fitted values and missing bins are unchanged.")
+    panels = (
+        ("amplitude", "Fitted amplitude", "viridis", 0, amplitude_max),
+        ("offset", "Fitted offset", "coolwarm", -offset_max, offset_max),
+        ("phase_shift_degrees", "Phase shift (degrees, modulo 90°)", "twilight", 0, 90),
+        ("rmse", "RMSE", "magma", 0, rmse_max),
+        ("r_squared", "R² (fraction of angular variation explained)", "viridis", 0, 1),
+        ("valid_chi_count", "Contributing chi bins", "viridis", 0, count_max),
+    )
+    for pair_id, original in pairs.items():
+        dataset = original.sortby("energy")
+        successful = int(dataset.fit_success.sum().item())
+        defined_count = int(dataset.phase_defined.sum().item())
+        print(f"\n{normalization_mode}/{pair_id}: {successful:,} fitted points; {defined_count:,} numerically defined phases")
+        print("  Phase is not an uncertainty estimate. Interpret weak-amplitude/low-R² phases cautiously.")
+        print("  Blank parameter pixels were not fitted, or phase was numerically undefined; no gaps are filled.")
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(2, 3, figsize=(19, 10), constrained_layout=True)
+            for axis, (field, title, cmap, vmin, vmax) in zip(axes.flat, panels):
+                values = dataset[field]
+                if field == "valid_chi_count":
+                    values = values.where(dataset.window_eligible)
+                image = axis.pcolormesh(
+                    dataset.q.values, dataset.energy.values,
+                    np.ma.masked_invalid(values.values), shading="nearest",
+                    cmap=cmap, vmin=vmin, vmax=vmax,
+                )
+                axis.set_title(title)
+                axis.set_xlabel("q (Å⁻¹)")
+                axis.set_ylabel("Energy (eV)")
+                extend = "neither"
+                if field in ("amplitude", "offset"):
+                    finite = values.values[np.isfinite(values.values)]
+                    below = int(np.count_nonzero(finite < vmin))
+                    above = int(np.count_nonzero(finite > vmax))
+                    if below and above:
+                        extend = "both"
+                    elif below:
+                        extend = "min"
+                    elif above:
+                        extend = "max"
+                    print(f"  {field}: {below:,} bins below and {above:,} above the color limits (of {finite.size:,} finite bins)")
+                colorbar = fig.colorbar(image, ax=axis, extend=extend)
+                if field == "amplitude":
+                    colorbar.set_label(f"Display limit: P{amplitude_percentile:g}")
+                elif field == "offset":
+                    colorbar.set_label(f"Display limits: ±P{offset_percentile:g}(|offset|)")
+                if field == "phase_shift_degrees":
+                    colorbar.set_ticks([0, 22.5, 45, 67.5, 90])
+            fig.suptitle(
+                f"Fixed-90° sinusoid parameter maps: {pair_id}\n"
+                f"{normalization_mode.replace('_', ' ')} normalization; "
+                f"centered mean over {dataset.attrs['q_bins']} q bins; native pair grid\n"
+                "Fit-quality maps accompany the parameters; phase colors are circular"
+            )
+            plt.show()
+            plt.close(fig)
