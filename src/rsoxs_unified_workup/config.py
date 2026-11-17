@@ -17,6 +17,107 @@ TABLE_FILES = {
 }
 
 
+def get_polarization_layout(scan_set):
+    """Read acquisition layout; older CSVs default to separate runs."""
+    value = scan_set.get("polarization_layout")
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "separate_runs"
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return "separate_runs"
+    if value not in ("separate_runs", "within_run"):
+        raise ValueError(
+            "polarization_layout must be 'separate_runs' or 'within_run', "
+            f"not {value!r}"
+        )
+    return value
+
+
+def scan_identity(record):
+    """Identify a logical scan by actual run ID AND polarization."""
+    try:
+        raw_id = record["scan_id"]
+        raw_pol = record["polarization_deg"]
+        if isinstance(raw_id, (bool, np.bool_)) or isinstance(raw_pol, (bool, np.bool_)):
+            raise ValueError("Scan IDs and polarizations cannot be booleans")
+        scan_id = int(raw_id)
+        polarization = float(raw_pol)
+        if scan_id <= 0 or float(raw_id) != scan_id or not isfinite(polarization):
+            raise ValueError("Invalid scan ID or polarization")
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise ValueError(
+            "Every scan row needs a positive integer scan_id and finite "
+            "numeric polarization_deg"
+        ) from error
+    return scan_id, int(polarization) if polarization.is_integer() else polarization
+
+
+def configured_scan_records(configuration):
+    """Validate logical identities without reading any measured data."""
+    layout = get_polarization_layout(configuration.get("scan_set", {}))
+    records = {}
+    run_ids = set()
+    polarizations = set()
+    for record in configuration["scans"]:
+        identity = scan_identity(record)
+        scan_id, polarization = identity
+        if identity in records:
+            raise ValueError(f"Duplicate scan ID/polarization: {identity}")
+        if polarization in polarizations:
+            raise ValueError("The scan set must have distinct polarizations")
+        if layout == "separate_runs" and scan_id in run_ids:
+            raise ValueError(
+                f"Scan {scan_id} supplies multiple polarizations. Set "
+                "polarization_layout=within_run in scan_sets.csv."
+            )
+        records[identity] = record
+        run_ids.add(scan_id)
+        polarizations.add(polarization)
+    if not records:
+        raise ValueError("No scans were supplied")
+    return records
+
+
+def pair_scan_records(configuration, pair):
+    """Resolve pair members, requiring polarization for ambiguous run IDs."""
+    available = configured_scan_records(configuration)
+    members = []
+    for member in (1, 2):
+        try:
+            raw_id = pair[f"scan_id_{member}"]
+            if isinstance(raw_id, (bool, np.bool_)):
+                raise ValueError("Boolean scan ID")
+            scan_id = int(raw_id)
+            if scan_id <= 0 or float(raw_id) != scan_id:
+                raise ValueError("Invalid scan ID")
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"Pair {pair.get('pair_id')!r}: invalid scan_id_{member}") from error
+        matches = [record for identity, record in available.items() if identity[0] == scan_id]
+        criterion = pair.get(f"polarization_deg_{member}")
+        missing = criterion is None or (
+            isinstance(criterion, float) and np.isnan(criterion)
+        ) or (isinstance(criterion, str) and not criterion.strip())
+        if not missing:
+            _, polarization = scan_identity({"scan_id": scan_id, "polarization_deg": criterion})
+            matches = [record for record in matches if scan_identity(record)[1] == polarization]
+        if len(matches) != 1:
+            raise ValueError(
+                f"Pair {pair.get('pair_id')!r}: scan {scan_id} matches "
+                f"{len(matches)} configured members. Specify the matching "
+                f"polarization_deg_{member} in polarization_pairs.csv."
+            )
+        members.append(matches[0])
+    identities = [scan_identity(record) for record in members]
+    if identities[0] == identities[1]:
+        raise ValueError(f"Pair {pair.get('pair_id')!r} refers to the same run/polarization twice")
+    pol_1, pol_2 = (identity[1] for identity in identities)
+    separation = abs(((pol_1 - pol_2 + 90) % 180) - 90)
+    if abs(separation - 90) > 1e-6:
+        raise ValueError(f"Pair {pair.get('pair_id')!r} is separated by {separation:g}°, not 90°")
+    return tuple(members)
+
+
 def get_beam_center(processing, pair_id):
     """Read the configured beam center for one polarization pair."""
     obsolete_keys = {
@@ -148,6 +249,7 @@ def _single_record(rows, description):
 def _validate_scan_set_metadata(scan_set):
     """Require separate acquisition-type and energy-region metadata."""
     scan_set_id = scan_set["scan_set_id"]
+    get_polarization_layout(scan_set)
     scan_type = scan_set.get("scan_type")
 
     if scan_type not in ("repeats", "long"):
@@ -254,6 +356,7 @@ def load_scan_set(scan_set_id, config_dir=None):
     )
 
     _validate_scan_set_metadata(scan_set)
+    scan_set["polarization_layout"] = get_polarization_layout(scan_set)
 
     sample = _single_record(
         tables["samples"].loc[
@@ -294,80 +397,24 @@ def load_scan_set(scan_set_id, config_dir=None):
 
 
 def get_mask_pairs(configuration):
-    """Return non-overlapping perpendicular pairs for mask sharing."""
-    scan_records = configuration["scans"]
-    if not scan_records:
-        raise ValueError("No scans were supplied for mask pairing")
-
-    polarization_by_scan_id = {}
-    for scan_record in scan_records:
-        scan_id = int(scan_record["scan_id"])
-        polarization = float(scan_record["polarization_deg"])
-
-        if scan_id in polarization_by_scan_id:
-            raise ValueError(f"Duplicate scan ID: {scan_id}")
-        if not isfinite(polarization):
-            raise ValueError(
-                f"Scan {scan_id} has a nonfinite polarization"
-            )
-
-        if polarization.is_integer():
-            polarization = int(polarization)
-
-        polarization_by_scan_id[scan_id] = polarization
-
-    if len(set(polarization_by_scan_id.values())) != len(scan_records):
-        raise ValueError(
-            "Mask pairing requires distinct polarizations in the scan set"
-        )
-
+    """Return disjoint perpendicular pairs of logical run/polarization members."""
+    available = configured_scan_records(configuration)
     mask_pairs = {}
-    used_scan_ids = set()
-
+    used = set()
     for pair in configuration["polarization_pairs"]:
         pair_id = pair["pair_id"]
-        scan_ids = (
-            int(pair["scan_id_1"]),
-            int(pair["scan_id_2"]),
-        )
-
         if pair_id in mask_pairs:
             raise ValueError(f"Duplicate polarization pair ID: {pair_id}")
-        if scan_ids[0] == scan_ids[1]:
-            raise ValueError(f"Pair {pair_id!r} refers to the same scan twice")
-
-        missing = set(scan_ids) - set(polarization_by_scan_id)
-        if missing:
-            raise ValueError(
-                f"Pair {pair_id!r} refers to scans outside this scan set: "
-                f"{sorted(missing)}"
-            )
-
-        overlap = set(scan_ids) & used_scan_ids
+        members = pair_scan_records(configuration, pair)
+        identities = [scan_identity(record) for record in members]
+        overlap = set(identities) & used
         if overlap:
             raise ValueError(
-                f"Scans {sorted(overlap)} belong to more than one pair. "
-                "Pairwise masks require one pair per scan."
+                f"Run/polarization members {sorted(overlap)} belong to multiple pairs"
             )
-
-        pol_1, pol_2 = (
-            polarization_by_scan_id[scan_id]
-            for scan_id in scan_ids
-        )
-        separation = abs(((pol_1 - pol_2 + 90) % 180) - 90)
-        if abs(separation - 90) > 1e-6:
-            raise ValueError(
-                f"Pair {pair_id!r} is separated by "
-                f"{separation:g}°, not 90°"
-            )
-
-        mask_pairs[pair_id] = (pol_1, pol_2)
-        used_scan_ids.update(scan_ids)
-
-    unpaired = set(polarization_by_scan_id) - used_scan_ids
+        mask_pairs[pair_id] = tuple(identity[1] for identity in identities)
+        used.update(identities)
+    unpaired = set(available) - used
     if unpaired:
-        raise ValueError(
-            f"Scans without a polarization pair: {sorted(unpaired)}"
-        )
-
+        raise ValueError(f"Run/polarization members without a pair: {sorted(unpaired)}")
     return mask_pairs

@@ -1,6 +1,8 @@
 import numpy as np
 import xarray as xr
 
+from rsoxs_unified_workup.config import pair_scan_records, scan_identity
+
 from rsoxs_unified_workup.normalization import (
     select_chi_region,
 )
@@ -31,37 +33,8 @@ def axial_angle_distance(angle_1, angle_2):
 
 
 def pair_polarizations(configuration, pair_record):
-    """Resolve a configured scan pair to its polarizations."""
-    polarization_by_scan_id = {
-        int(scan["scan_id"]): _polarization_value(
-            scan["polarization_deg"]
-        )
-        for scan in configuration["scans"]
-    }
-
-    scan_id_1 = int(pair_record["scan_id_1"])
-    scan_id_2 = int(pair_record["scan_id_2"])
-
-    try:
-        polarization_1 = polarization_by_scan_id[scan_id_1]
-        polarization_2 = polarization_by_scan_id[scan_id_2]
-    except KeyError as error:
-        raise ValueError(
-            f"Polarization pair {pair_record['pair_id']!r} "
-            f"refers to a scan outside this scan set"
-        ) from error
-
-    separation = axial_angle_distance(
-        polarization_1,
-        polarization_2,
-    )
-    if not np.isclose(separation, 90):
-        raise ValueError(
-            f"Polarization pair {pair_record['pair_id']!r} "
-            f"is separated by {separation:g}°, not 90°"
-        )
-
-    return polarization_1, polarization_2
+    """Resolve pair members consistently for separate and mixed runs."""
+    return tuple(scan_identity(record)[1] for record in pair_scan_records(configuration, pair_record))
 
 
 def assign_parallel_perpendicular(

@@ -14,6 +14,9 @@ import pandas as pd
 from rsoxs_unified_workup.config import (
     PROJECT_ROOT,
     get_mask_pairs,
+    configured_scan_records,
+    get_polarization_layout,
+    scan_identity,
 )
 from rsoxs_unified_workup.beam_center import (
     get_approved_beam_center,
@@ -153,6 +156,12 @@ def build_detector_image_dataset(scan_record, key):
         dataset.attrs["integrated_dark_frame_index"] = (
             scan_record["dark_integration"]["dark_frame_index"]
         )
+
+    if get_polarization_layout(scan_record) == "within_run":
+        dataset.attrs["polarization_layout"] = "within_run"
+        dataset.attrs["polarization_selection"] = scan_record["polarization_selection"]
+        if key == "darks":
+            dataset.attrs["dark_frame_scope"] = "complete_source_run"
 
     return dataset
 
@@ -881,6 +890,8 @@ def build_pair_workup_datasets(
 ):
     """Build separate export datasets for each pair's native q grid."""
     mask_pairs = get_mask_pairs(configuration)
+    configured = configured_scan_records(configuration)
+    layout = get_polarization_layout(configuration["scan_set"])
     processing = configuration["processing"]
 
     if set(scans) != {
@@ -976,6 +987,12 @@ def build_pair_workup_datasets(
                     "Scan dictionary keys do not match "
                     "polarization metadata"
                 )
+            if scan_identity(record) not in configured:
+                raise ValueError(
+                    f"Loaded run/polarization {scan_identity(record)} does not match the configuration"
+                )
+            if get_polarization_layout(record) != layout:
+                raise ValueError("The acquisition layout changed; reload and reprocess before exporting")
 
             mask = record["final_mask"]
 
@@ -1182,7 +1199,13 @@ def build_pair_workup_datasets(
         for record in pair_scans.values():
             scan_id = int(record["scan_id"])
             for key in ("data", "darks"):
-                group_name = f"pairs/{pair_id}/scans/{scan_id}/{key}"
+                base = f"pairs/{pair_id}/scans/{scan_id}"
+                if layout == "within_run":
+                    # Run ID alone is not a unique member of a mixed run.
+                    base += f"/polarizations/{float(record['polarization_deg']):g}"
+                group_name = f"{base}/{key}"
+                if group_name in datasets:
+                    raise ValueError(f"Duplicate detector export group: {group_name}")
                 datasets[group_name] = build_detector_image_dataset(
                     record,
                     key,
@@ -1259,7 +1282,7 @@ def build_manifest(configuration, datasets):
     git_status = _git_value("status", "--porcelain")
 
     return {
-        "schema_version": 6,
+        "schema_version": 7,
         "generated_at_utc": datetime.now(
             timezone.utc
         ).isoformat(),

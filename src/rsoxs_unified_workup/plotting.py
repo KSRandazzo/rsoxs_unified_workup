@@ -3,7 +3,11 @@ import numpy as np
 from matplotlib.colors import LogNorm
 from matplotlib.patches import Circle, Patch, Wedge
 import matplotlib.ticker as mticker
-from rsoxs_unified_workup.config import validate_requested_energies
+from rsoxs_unified_workup.config import (
+    validate_requested_energies,
+    pair_scan_records,
+    scan_identity,
+)
 
 
 def review_energy_indices(scan_record, processing, energy_values):
@@ -1450,10 +1454,6 @@ def plot_anisotropy_sector_overlays(
 ):
     """Overlay configured anisotropy sectors on detector frames."""
     processing = configuration["processing"]
-    scan_by_id = {
-        int(record["scan_id"]): record
-        for record in configuration["scans"]
-    }
     full_ring_sectors = sector_anisotropy_results["full_ring"]
 
     for pair in configuration["polarization_pairs"]:
@@ -1466,18 +1466,8 @@ def plot_anisotropy_sector_overlays(
             continue
 
         polarizations = [
-            scan_by_id[int(pair["scan_id_1"])][
-                "polarization_deg"
-            ],
-            scan_by_id[int(pair["scan_id_2"])][
-                "polarization_deg"
-            ],
-        ]
-        polarizations = [
-            int(value)
-            if float(value).is_integer()
-            else float(value)
-            for value in polarizations
+            scan_identity(record)[1]
+            for record in pair_scan_records(configuration, pair)
         ]
 
         with plt.style.context("dark_background"):

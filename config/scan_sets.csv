@@ -1,4 +1,31 @@
-scan_set_id,sample_id,scan_type,energy_region,beam_decay_status,proposal,cycle,adc_mode
-ksr216_2026apr_repeats_01,ksr216,repeats,C,No beam decay,319665,2026-1,4adc
-ksr216_2026apr_longC_01,ksr216,long,C,No beam decay,319665,2026-1,4adc
-ksr216_2026apr_longC_0_90_test,ksr216,long,C,No beam decay,319665,2026-1,4adc
+scan_set_id,sample_id,scan_type,energy_region,beam_decay_status,proposal,cycle,adc_mode,polarization_layout
+ksr216_2026apr_repeats_01,ksr216,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr216_2026apr_longC_01,ksr216,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr216_2026apr_longC_0_90_test,ksr216,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr224_2026apr_longC_01,ksr224,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr224_2026apr_repeats_01,ksr224,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr241_2026apr_longC_01,ksr241,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr241_2026apr_repeats_01,ksr241,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr233_2026apr_longC_01,ksr233,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr233_2026apr_repeats_01,ksr233,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr234_2026apr_longC_01,ksr234,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr234_2026apr_repeats_01,ksr234,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr232_2026apr_longC_01,ksr232,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr232_2026apr_repeats_01,ksr232,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr240_2026apr_longC_01,ksr240,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr240_2026apr_repeats_01,ksr240,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr228_2026apr_longC_01,ksr228,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr228_2026apr_repeats_01,ksr228,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+DS_EB1A_2023jul_longC_01,DS_EB1A,long,C,No beam decay,312604,2023-2,4adc,within_run
+ksr223_2026apr_longC_01,ksr223,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr223_2026apr_repeats_01,ksr223,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr222_2026apr_longC_01,ksr222,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr222_2026apr_repeats_01,ksr222,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr220_2026apr_longC_01,ksr220,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr220_2026apr_repeats_01,ksr220,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr221_2026apr_longC_01,ksr221,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr221_2026apr_repeats_01,ksr221,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr219_2026apr_longC_01,ksr219,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr219_2026apr_repeats_01,ksr219,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr219alt_2026apr_longC_01,ksr219alt,long,C,No beam decay,319665,2026-1,4adc,separate_runs
+ksr219alt_2026apr_repeats_01,ksr219alt,repeats,C,No beam decay,319665,2026-1,4adc,separate_runs
