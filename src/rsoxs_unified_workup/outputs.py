@@ -703,6 +703,149 @@ def build_averaged_anisotropy_dataset(
     )
 
 
+def build_angular_anisotropy_fit_dataset(
+    results, pair_id, reference, pair_q_cap, settings, pointwise_results,
+):
+    """Export full angular-fit maps on one pair's native grid.
+
+    Preserve both normalization modes, NaNs, numeric dtypes, fit flags,
+    q-window bounds, and source metadata. Display percentile limits have
+    no role in this export. No fitting or resampling is performed here.
+    """
+    modes = ("full_ring", "half_ring")
+    fields = (
+        "offset", "amplitude", "phase_shift_degrees", "cos_coefficient",
+        "sin_coefficient", "rmse", "r_squared", "design_condition_number",
+        "valid_chi_count", "fit_status", "fit_success", "phase_defined",
+        "window_eligible",
+    )
+    bounds = ("q_window_lower", "q_window_upper", "pair_q_cap")
+    if set(results) != set(modes):
+        raise ValueError("Angular-fit export requires both normalization modes")
+    q_bins = settings.get("q_bins", 1)
+    if (
+        settings.get("period_degrees") != 90
+        or settings.get("harmonics") != 1
+        or isinstance(q_bins, (bool, np.bool_))
+        or not isinstance(q_bins, (int, np.integer))
+        or q_bins < 1 or q_bins % 2 == 0 or q_bins > reference.sizes["q"]
+    ):
+        raise ValueError("Angular-map export requires period=90, harmonics=1, and a valid odd q_bins")
+    _check_export_grid(pair_q_cap, reference, pair_id, ("energy",))
+    q = reference.q.values
+    half = int(q_bins) // 2
+    centers = np.arange(half, q.size - half)
+    lower = np.full(q.size, np.nan)
+    upper = np.full(q.size, np.nan)
+    lower[centers] = q[centers - half]
+    upper[centers] = q[centers + half]
+    cap = pair_q_cap.values[:, None]
+    expected_eligible = (
+        np.isfinite(cap) & (cap > 0)
+        & np.isfinite(upper[None, :]) & (upper[None, :] <= cap)
+    )
+    arrays = []
+    metadata = {}
+    for mode in modes:
+        label = f"Angular fit {mode}/{pair_id}"
+        dataset = results[mode].get(pair_id)
+        if not isinstance(dataset, xr.Dataset):
+            raise TypeError(f"{label}: expected an xarray Dataset")
+        if set(dataset.data_vars) != set(fields + bounds):
+            raise ValueError(f"{label}: missing or unexpected angular-map variables")
+        required = {
+            "period_degrees": 90, "harmonics": 1, "parameter_count": 3,
+            "q_bins": int(q_bins), "q_cap_applied": True,
+            "polarization_pair_id": pair_id, "normalization_mode": mode,
+        }
+        if any(dataset.attrs.get(key) != value for key, value in required.items()):
+            raise ValueError(f"{label}: stale or missing fit settings; rerun the angular-map cell")
+        source = pointwise_results[mode][pair_id]["anisotropy"]
+        if (
+            dataset.attrs.get("source_chi_bin_count") != source.sizes["chi"]
+            or _json_ready(dataset.attrs.get("source_attributes")) != _json_ready(dict(source.attrs))
+        ):
+            raise ValueError(f"{label}: pointwise source metadata changed; rerun the angular-map cell")
+        _check_export_grid(dataset, reference, label, ("energy", "q"))
+        for name in fields:
+            if dataset[name].dims != ("energy", "q"):
+                raise ValueError(f"{label}/{name}: expected energy and q dimensions")
+        for name in bounds[:2]:
+            if dataset[name].dims != ("q",):
+                raise ValueError(f"{label}/{name}: expected q dimensions")
+        if dataset.pair_q_cap.dims != ("energy",):
+            raise ValueError(f"{label}/pair_q_cap: expected energy dimensions")
+        for name, expected in (
+            ("q_window_lower", lower), ("q_window_upper", upper),
+            ("pair_q_cap", pair_q_cap.values),
+        ):
+            if not np.array_equal(dataset[name].values, expected, equal_nan=True):
+                raise ValueError(f"{label}/{name}: current q window or pair cap differs; refit before exporting")
+        for name in ("fit_success", "phase_defined", "window_eligible"):
+            if dataset[name].dtype != np.dtype(bool):
+                raise ValueError(f"{label}/{name}: expected boolean flags")
+        for name in ("valid_chi_count", "fit_status"):
+            if not np.issubdtype(dataset[name].dtype, np.integer):
+                raise ValueError(f"{label}/{name}: expected integer values")
+        for name in fields[:8]:
+            if not np.issubdtype(dataset[name].dtype, np.floating):
+                raise ValueError(f"{label}/{name}: expected floating-point values")
+        status = dataset.fit_status.values
+        success = dataset.fit_success.values
+        count = dataset.valid_chi_count.values
+        if not np.isin(status, np.arange(7)).all():
+            raise ValueError(f"{label}: unknown fit-status codes")
+        if not np.array_equal(success, status == 0):
+            raise ValueError(f"{label}: fit status and success flag disagree")
+        if not np.array_equal(dataset.window_eligible.values, expected_eligible):
+            raise ValueError(f"{label}: q-window eligibility differs from the current pair cap")
+        if (
+            np.any(success & ~expected_eligible)
+            or np.any(count < 0) or np.any(count > source.sizes["chi"])
+            or np.any(success & (count <= 3))
+        ):
+            raise ValueError(f"{label}: inconsistent fit coverage")
+        for name in ("offset", "amplitude", "cos_coefficient", "sin_coefficient", "rmse"):
+            values = dataset[name].values
+            if not np.isfinite(values[success]).all() or not np.isnan(values[~success]).all():
+                raise ValueError(f"{label}/{name}: failed fits must be NaN and successful fits finite")
+        if np.any(dataset.amplitude.values[success] < 0) or np.any(dataset.rmse.values[success] < 0):
+            raise ValueError(f"{label}: amplitude and RMSE cannot be negative")
+        np.testing.assert_allclose(
+            dataset.amplitude.values[success],
+            np.hypot(dataset.cos_coefficient.values[success], dataset.sin_coefficient.values[success]),
+            rtol=1e-12, atol=1e-12,
+        )
+        defined = dataset.phase_defined.values
+        phase = dataset.phase_shift_degrees.values
+        if not np.array_equal(defined, np.isfinite(phase)) or np.any(defined & ~success):
+            raise ValueError(f"{label}: phase values and definition flags disagree")
+        if np.any((phase[defined] < 0) | (phase[defined] >= 90)):
+            raise ValueError(f"{label}: defined phases must lie in [0, 90) degrees")
+        metadata[mode] = dict(dataset.attrs)
+        arrays.append(dataset)
+    for name in fields + bounds:
+        if arrays[0][name].dtype != arrays[1][name].dtype:
+            raise ValueError(f"Angular fit {pair_id}/{name}: normalization-mode dtypes differ")
+    combined = xr.concat(
+        arrays,
+        dim=xr.IndexVariable("normalization_mode", list(modes)),
+        data_vars=list(fields), coords="minimal", compat="equals",
+        join="exact", combine_attrs="drop_conflicts",
+    )
+    combined.attrs = {
+        **combined.attrs,
+        "source_map_metadata_by_normalization_mode": metadata,
+        "source_product": "pointwise_anisotropy.anisotropy",
+        "display_clipping_applied": False,
+    }
+    for name in fields + bounds:
+        combined[name].attrs["source_attributes_by_normalization_mode"] = {
+            mode: dict(results[mode][pair_id][name].attrs) for mode in modes
+        }
+    return combined
+
+
 def _check_export_grid(value, reference, label, dimensions):
     """Require matching native coordinates without resampling."""
     if isinstance(value, (dict, xr.Dataset)):
@@ -734,6 +877,7 @@ def build_pair_workup_datasets(
     chi_averaged_pointwise_results,
     sector_averaged_anisotropy_results,
     global_intensity_ratio_results,
+    angular_anisotropy_map_results=None,
 ):
     """Build separate export datasets for each pair's native q grid."""
     mask_pairs = get_mask_pairs(configuration)
@@ -798,6 +942,12 @@ def build_pair_workup_datasets(
         for mode, pairs in results.items():
             if set(pairs) != set(mask_pairs):
                 raise ValueError(f"{name}/{mode}: configured pairs do not match")
+
+    if angular_anisotropy_map_results is not None:
+        if set(angular_anisotropy_map_results) != {"full_ring", "half_ring"}:
+            raise ValueError("Angular-fit normalization modes do not match")
+        if any(set(results) != set(mask_pairs) for results in angular_anisotropy_map_results.values()):
+            raise ValueError("Angular-fit pairs do not match the configuration")
 
     datasets = {}
 
@@ -996,6 +1146,20 @@ def build_pair_workup_datasets(
                 method=method,
             )
 
+        if angular_anisotropy_map_results is not None:
+            pair_q_cap = xr.concat(
+                [record["integration"]["q_cap"] for record in pair_scans.values()],
+                dim="pair_member", join="exact",
+            ).min("pair_member", skipna=False)
+            pair_datasets["angular_anisotropy_fit"] = build_angular_anisotropy_fit_dataset(
+                results=angular_anisotropy_map_results,
+                pair_id=pair_id,
+                reference=reference,
+                pair_q_cap=pair_q_cap,
+                settings=processing.get("angular_anisotropy_fit", {}),
+                pointwise_results=pointwise_anisotropy_results,
+            )
+
         for name, dataset in pair_datasets.items():
             _check_export_grid(
                 dataset,
@@ -1095,7 +1259,7 @@ def build_manifest(configuration, datasets):
     git_status = _git_value("status", "--porcelain")
 
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "generated_at_utc": datetime.now(
             timezone.utc
         ).isoformat(),
@@ -1178,6 +1342,7 @@ def save_workup_results(
     global_intensity_ratio_results,
     output_root=None,
     overwrite=False,
+    angular_anisotropy_map_results=None,
 ):
     """Save one complete workup as Zarr plus JSON metadata."""
     if aggregate_anisotropy_results is not None:
@@ -1194,6 +1359,7 @@ def save_workup_results(
         chi_averaged_pointwise_results=chi_averaged_pointwise_results,
         sector_averaged_anisotropy_results=sector_averaged_anisotropy_results,
         global_intensity_ratio_results=global_intensity_ratio_results,
+        angular_anisotropy_map_results=angular_anisotropy_map_results,
     )
 
     scan_set_id = str(
