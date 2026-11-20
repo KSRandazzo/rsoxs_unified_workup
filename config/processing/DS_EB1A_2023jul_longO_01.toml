@@ -1,12 +1,12 @@
-# Provisional starting settings copied from DS_EB1A_2023jul_longC_01.
-# Review beamstop/static masks and refit this pair's center before integration.
-# The inherited beam center is an initial estimate, not approval for this scan.
+# Processing settings for this scan set.
+# Review beamstop/static masks and the beam center before integration.
+# New exports are drafts; approval is a separate review step.
 
 [darks]
 upper_percentile = 99.98
 
 [plotting]
-# Provisional oxygen review energies; refine after inspecting loaded images.
+# Review energies appropriate to this scan's measured energy range.
 energies_ev = [532.6, 535.0, 536.0]
 
 [beamstop]
@@ -35,7 +35,7 @@ coarse_search_radius = 4
 coarse_step = 1
 fine_search_radius = 0.8
 fine_step = 0.1
-# Provisional oxygen fit energy; inspect the fringe before relying on the fit.
+# Inspect the fringe at fit_energy before relying on the center fit.
 fit_energy = 535.0
 q_target = 0.032
 q_window_halfwidth = 0.003
@@ -57,12 +57,16 @@ half_ring_halfwidth_degrees = 90
 [flux_correction]
 enabled = true
 
+# Optional angular-fit/model-comparison settings.
+# Commented entries are not configured; enable only after review.
 [angular_anisotropy_fit]
 energy_ev = 532.0
 q_value = 0.05
 q_bins = 7
 period_degrees = 90
 harmonics = 1
+# comparison_max_cycles = 8
+# comparison_max_harmonics = 2
 
 # Standard sector halfwidth for pointwise and sector anisotropy.
 # This is independent of beam-center-fit and normalization halfwidths.

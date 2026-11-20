@@ -1,5 +1,6 @@
-# Section layout follows DS_EB1A_2023jul_longO_01.toml.
-# Parameter values are specific to this scan set and have been preserved.
+# Processing settings for this scan set.
+# Review beamstop/static masks and the beam center before integration.
+# New exports are drafts; approval is a separate review step.
 
 [darks]
 upper_percentile = 99.98
@@ -56,14 +57,17 @@ half_ring_halfwidth_degrees = 90
 [flux_correction]
 enabled = true
 
-# Optional [angular_anisotropy_fit] settings were not configured in this file.
-# These examples stay commented out to preserve existing behavior.
+# Optional angular-fit/model-comparison settings.
+# Commented entries are not configured; enable only after review.
+# This optional section is not configured; examples remain disabled.
 # [angular_anisotropy_fit]
 # energy_ev = 284.8
 # q_value = 0.02201
 # q_bins = 7
 # period_degrees = 90
 # harmonics = 1
+# comparison_max_cycles = 8
+# comparison_max_harmonics = 2
 
 # Standard sector halfwidth for pointwise and sector anisotropy.
 # This is independent of beam-center-fit and normalization halfwidths.

@@ -1,5 +1,6 @@
-# Section layout follows DS_EB1A_2023jul_longO_01.toml.
-# Parameter values are specific to this scan set and have been preserved.
+# Processing settings for this scan set.
+# Review beamstop/static masks and the beam center before integration.
+# New exports are drafts; approval is a separate review step.
 
 [darks]
 upper_percentile = 99.98
@@ -60,6 +61,8 @@ half_ring_halfwidth_degrees = 90
 [flux_correction]
 enabled = true
 
+# Optional angular-fit/model-comparison settings.
+# Commented entries are not configured; enable only after review.
 [angular_anisotropy_fit]
 energy_ev = 284.8
 q_value = 0.04
