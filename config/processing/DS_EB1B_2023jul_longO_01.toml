@@ -1,4 +1,5 @@
-# Provisional starting settings copied from DS_EB1A_2023jul_longC_01.
+# Section layout follows DS_EB1A_2023jul_longO_01.toml.
+# Parameter values are specific to this scan set and have been preserved.
 # Review beamstop/static masks and refit this pair's center before integration.
 # The inherited beam center is an initial estimate, not approval for this scan.
 
@@ -6,7 +7,7 @@
 upper_percentile = 99.98
 
 [plotting]
-# Provisional oxygen review energies; refine after inspecting loaded images.
+# Review energies appropriate to this scan's measured energy range.
 energies_ev = [532.0, 535.0]
 
 [beamstop]
@@ -35,7 +36,7 @@ coarse_search_radius = 4
 coarse_step = 1
 fine_search_radius = 0.8
 fine_step = 0.1
-# Provisional oxygen fit energy; inspect the fringe before relying on the fit.
+# Inspect the fringe at fit_energy before relying on the center fit.
 fit_energy = 535.0
 q_target = 0.033
 q_window_halfwidth = 0.003

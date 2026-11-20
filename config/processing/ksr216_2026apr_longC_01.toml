@@ -1,5 +1,12 @@
+# Section layout follows DS_EB1A_2023jul_longO_01.toml.
+# Parameter values are specific to this scan set and have been preserved.
+
 [darks]
 upper_percentile = 99.98
+
+[plotting]
+# Review energies appropriate to this scan's measured energy range.
+energies_ev = [284.8, 286.0]
 
 [beamstop]
 center_x = 743
@@ -18,11 +25,20 @@ top_pixels = 6
 saturation_search_width = 90
 outer_usable_radius = 459
 
+[beam_centers.ksr216_2026apr_longC_01_pair_0_90]
+center_x = 472.85
+center_y = 514.8
+
+[beam_centers.ksr216_2026apr_longC_01_pair_45_135]
+center_x = 472.85
+center_y = 514.7
+
 [beam_center_fit]
 coarse_search_radius = 4
 coarse_step = 1
 fine_search_radius = 0.8
 fine_step = 0.1
+# Inspect the fringe at fit_energy before relying on the center fit.
 fit_energy = 284.8
 q_target = 0.02201
 q_window_halfwidth = 0.003
@@ -34,14 +50,6 @@ apply_postmask = true
 [runtime]
 beam_center_jobs = 32
 
-[beam_centers."ksr216_2026apr_longC_01_pair_0_90"]
-center_x = 472.85
-center_y = 514.8
-
-[beam_centers."ksr216_2026apr_longC_01_pair_45_135"]
-center_x = 472.85
-center_y = 514.7
-
 [integration]
 postmask_threshold = 1.0
 
@@ -51,9 +59,6 @@ half_ring_halfwidth_degrees = 90
 
 [flux_correction]
 enabled = true
-
-[plotting]
-energies_ev = [284.8, 286.0]
 
 [angular_anisotropy_fit]
 energy_ev = 284.8
