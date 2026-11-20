@@ -12,13 +12,15 @@ import warnings
 
 import pandas as pd
 
-from rsoxs_unified_workup.config import PROJECT_ROOT
+# Metadata browsing does not import processing configuration or beamline code.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 CATALOG_COLUMNS = (
     "sample_description", "sample_id", "sample_name", "polymer",
     "diameter_nm", "wash_state", "np_vendor", "mw_g_mol", "mn_g_mol", "pdi",
     "scan_set_id", "scan_type", "energy_region", "scan_type_recorded",
+    "beam_center_reflection_mode",
     "saved_at_utc", "run_id", "is_latest", "scan_ids", "polarizations",
     "scan_count", "pair_count", "group_count", "has_angular_fit",
     "schema_version", "git_commit", "git_working_tree_clean",
@@ -41,6 +43,27 @@ def _number_label(value):
     except ValueError:
         return text
     return f"{number:g}" if pd.notna(number) else ""
+
+
+def _beam_center_reflection_mode(configuration):
+    """Read the saved setting, never infer it from current code defaults.
+
+    An explicit JSON null means no reflection, just as in beam centering.
+    Missing or malformed metadata is unknown, not evidence of no reflection.
+    The setting alone does not establish that center fitting was performed.
+    """
+    processing = configuration.get("processing")
+    if not isinstance(processing, dict):
+        return "not_recorded"
+    fit_settings = processing.get("beam_center_fit")
+    if not isinstance(fit_settings, dict) or "reflection_mode" not in fit_settings:
+        return "not_recorded"
+    mode = fit_settings["reflection_mode"]
+    if mode is None:
+        return "none"
+    if isinstance(mode, str) and mode.strip():
+        return mode.strip().casefold()
+    return "not_recorded"
 
 
 def _manifest_paths(root, issues):
@@ -116,6 +139,9 @@ def _catalog_row(manifest_path):
         notes.append(f"Legacy scan_type {recorded_type!r} displayed as long/{region}")
     if not region:
         notes.append("Energy region was not recorded")
+    reflection_mode = _beam_center_reflection_mode(configuration)
+    if reflection_mode == "not_recorded":
+        notes.append("Beam-center mask reflection mode was not recorded or is unreadable")
 
     sample_id = _text(sample.get("sample_id") or scan_set.get("sample_id"))
     sample_name = _text(sample.get("sample_name"))
@@ -150,6 +176,7 @@ def _catalog_row(manifest_path):
         "scan_type": scan_type or None,
         "energy_region": region or None,
         "scan_type_recorded": recorded_type or None,
+        "beam_center_reflection_mode": reflection_mode,
         "saved_at_utc": saved_at,
         "run_id": manifest_path.parent.parent.name,
         "is_latest": False,
@@ -222,6 +249,7 @@ def build_results_catalog(results_root=None):
 def select_results(
     catalog, *, latest_only=True, sample_id=None, sample_name=None,
     scan_type=None, energy_region=None, polymer=None, wash_state=None, search=None,
+    reflection_mode=None,
 ):
     """Filter a catalog without modifying it or deleting saved versions.
 
@@ -230,6 +258,8 @@ def select_results(
     case-insensitive substring over the description and sample/scan-set IDs.
     Latest is determined across the complete catalog BEFORE filtering;
     filters do not silently substitute an older export for a current one.
+    reflection_mode=None includes all settings; the string "none" selects
+    no reflection and "not_recorded" selects missing/unreadable metadata.
     """
     if not isinstance(catalog, pd.DataFrame):
         raise TypeError("catalog must be a pandas DataFrame")
@@ -243,6 +273,7 @@ def select_results(
         ("sample_id", sample_id), ("sample_name", sample_name),
         ("scan_type", scan_type), ("energy_region", energy_region),
         ("polymer", polymer), ("wash_state", wash_state),
+        ("beam_center_reflection_mode", reflection_mode),
     ):
         if criterion is None:
             continue

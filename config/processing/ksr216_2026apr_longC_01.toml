@@ -63,3 +63,8 @@ period_degrees = 90
 harmonics = 1
 comparison_max_cycles = 8
 comparison_max_harmonics = 2
+
+# Standard sector halfwidth for pointwise and sector anisotropy.
+# This is independent of beam-center-fit and normalization halfwidths.
+[anisotropy]
+chi_halfwidth_degrees = 45

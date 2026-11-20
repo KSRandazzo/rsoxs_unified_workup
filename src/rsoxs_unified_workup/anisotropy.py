@@ -621,3 +621,113 @@ def calculate_global_intensity_ratio(pointwise_results):
             }
 
     return global_results
+
+
+def summarize_absolute_pointwise_anisotropy(
+    pointwise_results,
+    q_range,
+    *,
+    require_complete_q_range=True,
+):
+    """Summarize |A(E, chi, q)| versus energy on each pair's native q grid.
+
+    Take abs before the chi mean, then calculate both the sum and mean over
+    the selected q bins. This gives each contributing chi bin equal weight
+    within a q bin and each q bin equal weight in the subsequent q mean.
+    NaN/inf values are excluded, never replaced with zero. By default every
+    selected q bin must have angular support at an energy, preventing an
+    energy-dependent q cap from silently shortening the requested window.
+    Existing detector/beamstop masks still permit incomplete chi coverage.
+    """
+    try:
+        bounds = np.asarray(q_range, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise ValueError("q_range must contain two finite bounds in Å⁻¹") from error
+    if bounds.shape != (2,) or not np.isfinite(bounds).all():
+        raise ValueError("q_range must contain two finite bounds in Å⁻¹")
+    lower, upper = bounds.tolist()
+    if lower < 0 or upper < lower:
+        raise ValueError("q_range must satisfy 0 <= lower <= upper")
+    if not isinstance(require_complete_q_range, bool):
+        raise ValueError("require_complete_q_range must be True or False")
+    if not pointwise_results:
+        raise ValueError("No pointwise anisotropy results supplied")
+
+    summaries = {}
+    for mode, pair_results in pointwise_results.items():
+        if not pair_results:
+            raise ValueError(f"{mode}: no polarization-pair results supplied")
+        summaries[mode] = {}
+        for pair_id, result in pair_results.items():
+            values = result["anisotropy"]
+            if not isinstance(values, xr.DataArray) or set(values.dims) != {"energy", "chi", "q"}:
+                raise ValueError(f"{mode}/{pair_id}: expected energy, chi, and q dimensions")
+            if values.attrs.get("q_cap_applied") is not True:
+                raise ValueError(f"{mode}/{pair_id}: rerun q-capped pointwise anisotropy first")
+            values = values.transpose("energy", "chi", "q")
+            for coordinate in ("energy", "chi", "q"):
+                grid = np.asarray(values[coordinate].values, dtype=float)
+                if not grid.size or not np.isfinite(grid).all() or len(np.unique(grid)) != len(grid):
+                    raise ValueError(f"{mode}/{pair_id}: {coordinate} coordinates must be nonempty, finite, and unique")
+            native_q = values.q.values
+            if np.any(np.diff(native_q) <= 0):
+                raise ValueError(f"{mode}/{pair_id}: q coordinates must increase strictly")
+            if upper > float(native_q[-1]) + 1e-12:
+                raise ValueError(
+                    f"{mode}/{pair_id}: requested q upper bound {upper:g} Å⁻¹ "
+                    f"exceeds the available q-grid range {native_q[0]:g} to {native_q[-1]:g} Å⁻¹"
+                )
+            selected = values.isel(q=np.flatnonzero((native_q >= lower) & (native_q <= upper)))
+            if not selected.sizes["q"]:
+                raise ValueError(
+                    f"{mode}/{pair_id}: no q bins within {lower:g} to {upper:g} Å⁻¹; "
+                    f"available q-grid range is {native_q[0]:g} to {native_q[-1]:g} Å⁻¹"
+                )
+            finite = np.isfinite(selected)
+            absolute = abs(selected.where(finite))
+            chi_mean = absolute.mean("chi", skipna=True)
+            chi_count = finite.sum("chi")
+            q_count = np.isfinite(chi_mean).sum("q")
+            point_count = finite.sum(("chi", "q"))
+            eligible = q_count > 0
+            if require_complete_q_range:
+                eligible = eligible & (q_count == selected.sizes["q"])
+            total = chi_mean.sum("q", skipna=True, min_count=1).where(eligible)
+            mean = chi_mean.mean("q", skipna=True).where(eligible)
+            dataset = xr.Dataset({
+                "sum_abs_anisotropy": total,
+                "mean_abs_anisotropy": mean,
+                "chi_mean_abs_anisotropy": chi_mean,
+                "valid_chi_count": chi_count,
+                "valid_q_count": q_count,
+                "valid_point_count": point_count,
+                "eligible": eligible,
+            })
+            dataset.attrs = {
+                "polarization_pair_id": pair_id,
+                "normalization_mode": mode,
+                "source_product": values.attrs.get("source_product", "clean"),
+                "q_cap_applied": True,
+                "q_range_requested": [lower, upper],
+                "q_range_selected": [float(selected.q.values[0]), float(selected.q.values[-1])],
+                "selected_q_bin_count": selected.sizes["q"],
+                "source_chi_bin_count": selected.sizes["chi"],
+                "require_complete_q_range": require_complete_q_range,
+                "aggregation_order": "abs pointwise A, mean over finite chi bins at each q, then sum or mean over q",
+                "weighting": "equal finite chi-bin weights within q; equal q-bin weights",
+                "interpretation": "Magnitude summary, not signed anisotropy or a physical q integral; noise contributes positively",
+            }
+            for key in ("sum_abs_anisotropy", "mean_abs_anisotropy", "chi_mean_abs_anisotropy"):
+                dataset[key].attrs = {
+                    "q_cap_applied": True,
+                    "absolute_value_before_averaging": True,
+                    "units": "dimensionless",
+                }
+            dataset["sum_abs_anisotropy"].attrs["description"] = "Sum over q of the chi mean of absolute pointwise A"
+            dataset["mean_abs_anisotropy"].attrs["description"] = "Mean over q of the chi mean of absolute pointwise A"
+            dataset["valid_q_count"].attrs["description"] = "Selected q bins with at least one finite angular point"
+            dataset["valid_point_count"].attrs["description"] = "Finite pointwise bins across the selected chi and q coordinates"
+            dataset["valid_chi_count"].attrs["description"] = "Finite angular bins at each energy and selected q"
+            dataset["eligible"].attrs["description"] = "Energy is eligible under the selected q-support policy"
+            summaries[mode][pair_id] = dataset
+    return summaries

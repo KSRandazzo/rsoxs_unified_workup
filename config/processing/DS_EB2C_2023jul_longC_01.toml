@@ -61,3 +61,8 @@ q_value = 0.0185
 q_bins = 7
 period_degrees = 90
 harmonics = 1
+
+# Standard sector halfwidth for pointwise and sector anisotropy.
+# This is independent of beam-center-fit and normalization halfwidths.
+[anisotropy]
+chi_halfwidth_degrees = 45

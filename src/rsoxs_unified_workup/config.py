@@ -2,6 +2,7 @@ from pathlib import Path
 import tomllib
 import pandas as pd
 from math import isfinite
+from decimal import Decimal, InvalidOperation
 import numpy as np
 
 
@@ -15,6 +16,125 @@ TABLE_FILES = {
     "polarization_pairs": "polarization_pairs.csv",
     "anisotropy_sectors": "anisotropy_sectors.csv",
 }
+
+POLARIZATION_SCAN_COLUMNS = {
+    0: "pol0_scan_id",
+    90: "pol90_scan_id",
+    45: "pol45_scan_id",
+    135: "pol135_scan_id",
+}
+
+STANDARD_SECTORS = {
+    (0, 90): (("12oclock", 90), ("9oclock", 180),
+              ("6oclock", -90), ("3oclock", 0)),
+    (45, 135): (("10p30oclock", 135), ("7p30oclock", -135),
+               ("4p30oclock", -45), ("1p30oclock", 45)),
+}
+
+
+def uses_compact_scan_sets(columns):
+    """The four run-ID columns opt a configuration into generated records."""
+    required = set(POLARIZATION_SCAN_COLUMNS.values())
+    present = required.intersection(columns)
+    if present and present != required:
+        raise ValueError(
+            "scan_sets.csv must include all four polarization run-ID columns. "
+            f"Missing: {sorted(required - present)}. Leave absent polarizations blank."
+        )
+    return bool(present)
+
+
+def _optional_run_id(value, column, scan_set_id):
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if value.lower() in ("", "none", "n/a", "na", "nan"):
+            return None
+    try:
+        if isinstance(value, str):
+            number = Decimal(value)
+            if not number.is_finite() or number != number.to_integral_value():
+                raise ValueError("Noninteger run ID")
+            value = int(number)
+        scan_id, _ = scan_identity({"scan_id": value, "polarization_deg": 0})
+    except (ValueError, InvalidOperation) as error:
+        raise ValueError(
+            f"Scan set {scan_set_id!r}: {column} must be a positive integer "
+            "run ID, or blank/N/A/None."
+        ) from error
+    return scan_id
+
+
+def get_anisotropy_sector_halfwidth(processing):
+    """Generated nonoverlapping sectors default to a 45-degree halfwidth."""
+    settings = processing.get("anisotropy", {})
+    if not isinstance(settings, dict):
+        raise ValueError("[anisotropy] must be a TOML table")
+    value = settings.get("chi_halfwidth_degrees", 45)
+    try:
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError("Boolean halfwidth")
+        halfwidth = float(value)
+        if not isfinite(halfwidth) or not 0 < halfwidth <= 45:
+            raise ValueError("Invalid halfwidth")
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(
+            "[anisotropy] chi_halfwidth_degrees must be finite and greater "
+            "than 0 but no greater than 45; wider standard sectors overlap."
+        ) from error
+    return halfwidth
+
+
+def generate_scan_set_records(scan_set, processing=None):
+    """Derive logical scans, perpendicular pairs, and standard sectors.
+
+    Only run IDs explicitly entered in scan_sets.csv are used. Nothing is
+    downloaded and no files are written. IDs match the legacy conventions.
+    """
+    if not uses_compact_scan_sets(scan_set.keys()):
+        raise ValueError("The four polarization run-ID columns are required")
+    _validate_scan_set_metadata(scan_set)
+    scan_set_id = scan_set["scan_set_id"]
+    run_ids = {
+        pol: _optional_run_id(scan_set[column], column, scan_set_id)
+        for pol, column in POLARIZATION_SCAN_COLUMNS.items()
+    }
+    scans = [
+        {"scan_id": run_id, "scan_set_id": scan_set_id, "polarization_deg": pol}
+        for pol, run_id in run_ids.items() if run_id is not None
+    ]
+    if not scans:
+        raise ValueError(f"Scan set {scan_set_id!r}: no polarization run IDs supplied")
+    pairs, sectors = [], []
+    halfwidth = get_anisotropy_sector_halfwidth(processing or {})
+    for (first, second), sector_definitions in STANDARD_SECTORS.items():
+        first_id, second_id = run_ids[first], run_ids[second]
+        if first_id is None and second_id is None:
+            continue
+        if first_id is None or second_id is None:
+            missing = first if first_id is None else second
+            raise ValueError(
+                f"Scan set {scan_set_id!r}: incomplete {first}°/{second}° pair. "
+                f"Supply {POLARIZATION_SCAN_COLUMNS[missing]}, or leave both members blank."
+            )
+        pair_id = f"{scan_set_id}_pair_{first}_{second}"
+        pairs.append({
+            "pair_id": pair_id, "scan_set_id": scan_set_id,
+            "scan_id_1": first_id, "scan_id_2": second_id,
+            "polarization_deg_1": first, "polarization_deg_2": second,
+        })
+        sectors.extend({
+            "sector_id": f"{scan_set_id}_{label}", "scan_set_id": scan_set_id,
+            "pair_id": pair_id, "label": label, "chi_center_deg": center,
+            "chi_halfwidth_deg": halfwidth,
+        } for label, center in sector_definitions)
+    records = {
+        "scans": scans, "polarization_pairs": pairs, "anisotropy_sectors": sectors,
+    }
+    # Reuse the existing identity/pair guards, including acquisition layout.
+    get_mask_pairs({"scan_set": scan_set, **records})
+    return records
 
 
 def get_polarization_layout(scan_set):
@@ -199,19 +319,31 @@ def get_beam_centers(processing, mask_pairs):
 
 
 def read_config_tables(config_dir=None):
-    """Read all configuration CSV files."""
+    """Read manual CSVs; read legacy linked tables only without run-ID columns.
+
+    In compact mode only samples.csv and scan_sets.csv are inputs. The old
+    three linked CSVs may remain on disk, but are not read or used as fallback.
+    """
     if config_dir is None:
         config_dir = DEFAULT_CONFIG_DIR
     config_dir = Path(config_dir)
     tables = {}
 
-    for table_name, filename in TABLE_FILES.items():
+    for table_name in ("samples", "scan_sets"):
+        filename = TABLE_FILES[table_name]
         path = config_dir / filename
 
         if not path.exists():
             raise FileNotFoundError(f"Missing configuration file: {path}")
 
         tables[table_name] = pd.read_csv(path)
+
+    if not uses_compact_scan_sets(tables["scan_sets"].columns):
+        for table_name in ("scans", "polarization_pairs", "anisotropy_sectors"):
+            path = config_dir / TABLE_FILES[table_name]
+            if not path.exists():
+                raise FileNotFoundError(f"Missing legacy configuration file: {path}")
+            tables[table_name] = pd.read_csv(path)
 
     return tables
 
@@ -345,7 +477,7 @@ def validate_requested_energies(
 
 
 def load_scan_set(scan_set_id, config_dir=None):
-    """Load a scan set and its linked sample, scans, and pairs."""
+    """Load manual inputs and generate records, or read the legacy layout."""
     tables = read_config_tables(config_dir)
 
     scan_set = _single_record(
@@ -364,6 +496,13 @@ def load_scan_set(scan_set_id, config_dir=None):
         ],
         f"sample named {scan_set['sample_id']!r}",
     )
+
+    if uses_compact_scan_sets(tables["scan_sets"].columns):
+        processing = read_processing_config(scan_set_id, config_dir)
+        return {
+            "sample": sample, "scan_set": scan_set, "processing": processing,
+            **generate_scan_set_records(scan_set, processing),
+        }
 
     scans = tables["scans"].loc[
         tables["scans"]["scan_set_id"] == scan_set_id

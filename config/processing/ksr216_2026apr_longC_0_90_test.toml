@@ -50,3 +50,8 @@ enabled = true
 
 [plotting]
 energies_ev = [284.8, 286.0]
+
+# Standard sector halfwidth for pointwise and sector anisotropy.
+# This is independent of beam-center-fit and normalization halfwidths.
+[anisotropy]
+chi_halfwidth_degrees = 45

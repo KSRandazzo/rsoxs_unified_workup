@@ -17,29 +17,28 @@ Add an optional `polarization_layout` column to `config/scan_sets.csv`:
 Continue to use `scan_type` (`long` or `repeats`) and `energy_region`
 (`C`, `O`, etc.) independently of this layout.
 
-In `config/scans.csv`, write one row per desired polarization. For example,
-a two-polarization carbon run would have these relevant fields:
+In `config/scan_sets.csv`, enter each desired polarization's physical run ID
+in the four columns `pol0_scan_id`, `pol90_scan_id`, `pol45_scan_id`, and
+`pol135_scan_id`. For a two-polarization carbon run, the relevant fields are:
 
 ```csv
-scan_set_id,scan_id,polarization_deg
-DS_EB1A_longC_01,67456,0
-DS_EB1A_longC_01,67456,90
+scan_set_id,polarization_layout,pol0_scan_id,pol90_scan_id,pol45_scan_id,pol135_scan_id
+DS_EB1A_longC_01,within_run,67456,67456,,
 ```
 
-In `config/polarization_pairs.csv`, add `polarization_deg_1` and
-`polarization_deg_2` to distinguish pair members with the same run ID:
+The loader generates separate logical scan records and an explicitly
+polarization-qualified pair from these entries. No manual entries in
+`scans.csv`, `polarization_pairs.csv`, or `anisotropy_sectors.csv` are needed.
+Blanks, `N/A`, and `None` mark absent polarizations; incomplete perpendicular
+pairs are rejected. Repeating a run ID is valid with `within_run`.
 
-```csv
-scan_set_id,pair_id,scan_id_1,scan_id_2,polarization_deg_1,polarization_deg_2
-DS_EB1A_longC_01,DS_EB1A_longC_01_pair_0_90,67456,67456,0,90
-```
+The example shows only relevant fields, not a replacement CSV: retain all
+existing scan-set metadata columns. See `compact_configuration.md` for the
+complete manual-input workflow and backwards-compatible legacy behavior.
 
-Old pair rows can leave the new columns blank when each run ID uniquely
-identifies its member. Existing columns in either CSV must be retained.
-The examples above show the relevant fields, not replacement files.
-
-Configure sectors and one processing TOML per scan set as before. Pair IDs
-must match the sectors and `[beam_centers.<pair_id>]` TOML tables. A carbon
+Keep one processing TOML per scan set, with `[anisotropy]
+chi_halfwidth_degrees = 45` controlling generated sector halfwidths. Generated
+pair IDs match the existing `[beam_centers.<pair_id>]` TOML tables. A carbon
 run and an oxygen run belong in separate scan sets with their respective
 energy regions, fit/plot energies, and reviewed beam centers.
 

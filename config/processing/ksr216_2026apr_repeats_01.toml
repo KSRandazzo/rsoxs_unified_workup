@@ -51,3 +51,8 @@ half_ring_halfwidth_degrees = 90
 
 [flux_correction]
 enabled = true
+
+# Standard sector halfwidth for pointwise and sector anisotropy.
+# This is independent of beam-center-fit and normalization halfwidths.
+[anisotropy]
+chi_halfwidth_degrees = 45

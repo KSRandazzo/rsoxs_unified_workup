@@ -3184,3 +3184,87 @@ def plot_angular_anisotropy_map_review(
             )
             plt.show()
             plt.close(fig)
+
+
+def plot_absolute_pointwise_energy_review(
+    summary_results,
+    *,
+    normalization_mode="half_ring",
+    statistic="mean",
+    reference_level=None,
+):
+    """Plot a q-window magnitude summary and its coverage for each pair.
+
+    The horizontal dotted line is a visual reference, not a significance
+    threshold. With reference_level=None it is the median of the eligible
+    curve, calculated separately for each pair. Missing energies stay blank.
+    """
+    fields = {"mean": "mean_abs_anisotropy", "sum": "sum_abs_anisotropy"}
+    if statistic not in fields:
+        raise ValueError("statistic must be 'mean' or 'sum'")
+    pairs = summary_results.get(normalization_mode)
+    if not pairs:
+        raise ValueError(f"No q-window summaries for normalization_mode={normalization_mode!r}")
+    if reference_level is not None:
+        if isinstance(reference_level, (bool, np.bool_)):
+            raise ValueError("reference_level must be a finite nonnegative number or None")
+        reference_level = float(reference_level)
+        if not np.isfinite(reference_level) or reference_level < 0:
+            raise ValueError("reference_level must be a finite nonnegative number or None")
+
+    for pair_id, original in pairs.items():
+        dataset = original.sortby("energy")
+        curve = dataset[fields[statistic]].transpose("energy")
+        energies = curve.energy.values
+        values = curve.values
+        finite = np.isfinite(values)
+        level = reference_level
+        if level is None and np.any(finite):
+            level = float(np.median(values[finite]))
+        selected_count = int(dataset.attrs["selected_q_bin_count"])
+        requested = dataset.attrs["q_range_requested"]
+        actual = dataset.attrs["q_range_selected"]
+        print(f"{normalization_mode}/{pair_id}: requested q={requested[0]:g} to {requested[1]:g} Å⁻¹")
+        print(f"  Selected {selected_count} native q bins: {actual[0]:.8g} to {actual[1]:.8g} Å⁻¹")
+        print(f"  {int(finite.sum())}/{finite.size} energies plotted; {int((~finite).sum())} missing/ineligible energies remain blank")
+        if level is not None:
+            above = finite & (values >= level)
+            below = finite & (values < level)
+            print(f"  Dotted reference={level:.6g}; {int(above.sum())} energies at/above, {int(below.sum())} below")
+        else:
+            print("  No eligible values: reduce the q range or check angular coverage and the q cap.")
+        if not dataset.attrs["require_complete_q_range"]:
+            print("  WARNING: partial q windows are allowed; changing coverage can affect comparisons.")
+
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5), constrained_layout=True)
+            axes[0].plot(energies, values, color="deepskyblue", label=f"{statistic.capitalize()} |A| summary")
+            if level is not None:
+                axes[0].axhline(
+                    level, color="white", linestyle=":", linewidth=1,
+                    label=f"Reference = {level:.5g}" + (" (median)" if reference_level is None else ""),
+                )
+                axes[0].scatter(energies[above], values[above], s=15, color="orange", label="At/above reference", zorder=3)
+                axes[0].scatter(energies[below], values[below], s=15, color="deepskyblue", label="Below reference", zorder=3)
+            axes[0].set_title("Absolute pointwise anisotropy versus energy")
+            axes[0].set_xlabel("Energy (eV)")
+            axes[0].set_ylabel(
+                "Mean over q of chi-mean |A|" if statistic == "mean" else "Sum over q of chi-mean |A|"
+            )
+            axes[0].set_ylim(bottom=0)
+            axes[0].legend(fontsize=8)
+
+            axes[1].plot(energies, dataset.valid_q_count.values, marker=".", color="deepskyblue", label="q bins with angular support")
+            axes[1].axhline(selected_count, color="white", linestyle=":", linewidth=1, label="Complete selected q window")
+            axes[1].set_title("q-window coverage (q cap remains applied)")
+            axes[1].set_xlabel("Energy (eV)")
+            axes[1].set_ylabel("Number of contributing q bins")
+            axes[1].set_ylim(0, selected_count * 1.1)
+            axes[1].legend(fontsize=8)
+            fig.suptitle(
+                f"{pair_id}; {normalization_mode.replace('_', ' ')} normalization\n"
+                f"Requested q={requested[0]:g}–{requested[1]:g} Å⁻¹; {selected_count} native bins\n"
+                "Absolute value before angular averaging; no smoothing or missing-data filling"
+            )
+            plt.show()
+            plt.close(fig)

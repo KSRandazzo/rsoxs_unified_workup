@@ -1192,6 +1192,15 @@ def build_pair_workup_datasets(
                 "q_grid_scope": "polarization_pair",
             })
 
+            selection_methods = {
+                str(polarization): record["beam_center_approval"].get(
+                    "selection_method", "fitted_review"
+                )
+                for polarization, record in pair_scans.items()
+            }
+            if "configured_no_fit" in selection_methods.values():
+                dataset.attrs["beam_center_selection_methods"] = selection_methods
+
             datasets[f"pairs/{pair_id}/{name}"] = dataset
 
         # Preserve each scan separately: no alignment across scans'

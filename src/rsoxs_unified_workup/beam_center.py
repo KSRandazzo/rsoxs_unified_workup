@@ -1108,6 +1108,7 @@ def approve_beam_center(
     for polarization in mask_pairs[pair_id]:
         entry = _current_center_fit(scans[polarization], processing)
         approvals[polarization] = {
+            "selection_method": "fitted_review",
             "center": deepcopy(review["center"]),
             "mask_pair_id": pair_id,
             "mask_pair_polarizations": deepcopy(
@@ -1123,11 +1124,94 @@ def approve_beam_center(
     return deepcopy(review["center"])
 
 
+def approve_configured_beam_centers(
+    scans,
+    processing,
+    mask_pairs,
+    *,
+    approve=False,
+):
+    """Explicitly use each TOML center without creating a fictitious fit."""
+    if approve is not True:
+        raise ValueError(
+            "Explicitly approve using the configured centers without fitting."
+        )
+
+    settings = deepcopy(processing)
+    centers = _validated_scan_pairs(scans, settings, mask_pairs)
+    pass_id = uuid4().hex
+    approved_at = datetime.now(timezone.utc).isoformat()
+    pending = {}
+
+    for pair_id, pair in mask_pairs.items():
+        for polarization in pair:
+            record = scans[polarization]
+            mask = record["final_mask"]
+            if not mask.attrs.get("mask_id"):
+                raise ValueError("The final mask needs a nonempty mask_id.")
+            pending[polarization] = {
+                "selection_method": "configured_no_fit",
+                "center": deepcopy(centers[pair_id]),
+                "scan_id": int(record["scan_id"]),
+                "polarization_deg": float(record["polarization_deg"]),
+                "mask_pair_id": pair_id,
+                "mask_pair_polarizations": deepcopy(
+                    mask.attrs["mask_pair_polarizations"]
+                ),
+                "mask_id": mask.attrs["mask_id"],
+                "center_mask_settings": deepcopy(settings["center_mask"]),
+                "pass_id": pass_id,
+                "approved_at_utc": approved_at,
+            }
+
+    # A failed validation must not leave only part of the set approved.
+    for polarization, approval in pending.items():
+        scans[polarization]["beam_center_approval"] = approval
+    return deepcopy(centers)
+
+
+def _approved_configured_center(scan_record, processing, approval):
+    """Reject manual approvals when the scan, pair, center or mask changed."""
+    mask = scan_record.get("final_mask")
+    if mask is None:
+        raise ValueError("Rebuild the final masks before approving a TOML center.")
+    pair_id = _scan_pair_id(scan_record, mask)
+    center = get_beam_center(processing, pair_id)
+    expected = {
+        "center": center,
+        "scan_id": int(scan_record["scan_id"]),
+        "polarization_deg": float(scan_record["polarization_deg"]),
+        "mask_pair_id": pair_id,
+        "mask_pair_polarizations": mask.attrs["mask_pair_polarizations"],
+        "mask_id": mask.attrs.get("mask_id"),
+        "center_mask_settings": processing["center_mask"],
+    }
+    if (
+        any(approval.get(key) != value for key, value in expected.items())
+        or not approval.get("pass_id")
+        or not mask.attrs.get("mask_id")
+        or mask.attrs.get("beam_center") != center
+        or mask.attrs.get("center_mask_settings") != processing["center_mask"]
+    ):
+        raise ValueError(
+            "The configured-center approval is stale. Rebuild masks if the "
+            "center or mask settings changed, then approve the TOML center "
+            "again and recompute downstream results."
+        )
+    return deepcopy(center)
+
+
 def get_approved_beam_center(scan_record, processing):
     """Require current pair-specific approval before integration."""
+    approval = scan_record.get("beam_center_approval")
+    if (
+        isinstance(approval, dict)
+        and approval.get("selection_method") == "configured_no_fit"
+    ):
+        return _approved_configured_center(scan_record, processing, approval)
+
     entry = _current_center_fit(scan_record, processing)
     center = get_beam_center(processing, entry["mask_pair_id"])
-    approval = scan_record.get("beam_center_approval")
 
     if (
         not isinstance(approval, dict)
