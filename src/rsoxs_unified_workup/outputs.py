@@ -1291,7 +1291,10 @@ def build_manifest(configuration, datasets):
     git_status = _git_value("status", "--porcelain")
 
     return {
-        "schema_version": 7,
+        "schema_version": 8,
+        # A successful save is not scientific approval. Reviews are recorded
+        # separately, without rewriting this provenance snapshot.
+        "review_status": "draft",
         "generated_at_utc": datetime.now(
             timezone.utc
         ).isoformat(),

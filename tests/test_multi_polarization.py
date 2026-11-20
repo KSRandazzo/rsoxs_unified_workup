@@ -365,7 +365,8 @@ class DownstreamTests(unittest.TestCase):
                     self.assertEqual(set(summary['groups']), set(datasets))
                     with summary['manifest'].open() as stream:
                         manifest = json.load(stream)
-                    self.assertEqual(manifest['schema_version'], 7)
+                    self.assertEqual(manifest['schema_version'], 8)
+                    self.assertEqual(manifest['review_status'], 'draft')
                     self.assertEqual(manifest['configuration']['scan_set']['polarization_layout'], 'within_run')
                     for group, dataset in datasets.items():
                         with xr.open_zarr(summary['zarr_store'], group=group, consolidated=True, chunks=None) as saved:

@@ -28,4 +28,9 @@ then averages or sums across a chosen q range. User-defined vertical energy
 markers aid comparison. See [energy-summary instructions](docs/absolute_pointwise_energy_summary.md).
 
 Saved data and figures live under `results/`, which is excluded from Git.
+New exports are drafts; explicit per-export review makes them approved. The
+browser defaults to approved results. Historical workflow-development exports
+can be segregated under `results_development/` without deletion. See
+[results review and development archives](docs/results_review.md).
+Both result locations require a separate backup; Git does not store their data.
 Committing code/configuration does not back up those exports.

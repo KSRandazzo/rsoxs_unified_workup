@@ -30,8 +30,10 @@ Zarr, and numcodecs are needed for the optional array-opening cell.
    exports. `None` searches for a `results` folder relative to the current
    working directory and its parents. On another machine, set an explicit
    path to your copied results folder. It may contain multiple run folders.
-4. Refresh, filter, and inspect a saved export as before. Metadata comes
-   from its saved manifest, never from current configuration CSVs or TOMLs.
+4. Refresh, filter, and inspect an export. The default `REVIEW_STATUS =
+   "approved"` shows explicitly reviewed exports; use `"draft"`,
+   `"development"`, or None to inspect other statuses. Metadata comes from
+   its saved manifest and review JSON, never current configuration CSVs/TOMLs.
 5. Optional: set `OPEN_DATASET = True` and `GROUP_NAME` to an exact exported
    group listed by the inspect cell, then run the array-opening cell.
 
@@ -71,8 +73,18 @@ not no reflection. An explicit JSON null is interpreted as no reflection,
 matching the centering function. Future named settings remain visible.
 
 Keep `LATEST_ONLY = False` to compare older exports with different reflection
-settings for one scan set. With `True`, newest status is still determined per
-scan set before filtering; an older matching export is not substituted.
+settings for one scan set. With `True`, review status is selected first, then
+the newest save per scan set within that status, then reflection/other filters.
+A newer draft does not hide an approved result. An older matching reflection
+export is not substituted if the newest approved export fails that filter.
+
+Review records are append-only and tied to an exact manifest hash. Old exports
+without status metadata are development; they are never automatically approved.
+Malformed or mismatched latest review records show `unknown` and cannot enter
+the approved view. The browser does not write review decisions. To inspect the
+segregated archive, point `RESULTS_ROOT` at its archived `results/` directory and
+change `REVIEW_STATUS` to `"development"` or None. See [results_review.md](results_review.md)
+for approval, withdrawal, and archive instructions.
 
 This reports the saved centering setting, not proof that center fitting ran.
 Configured-center approval without fitting may still record the setting.

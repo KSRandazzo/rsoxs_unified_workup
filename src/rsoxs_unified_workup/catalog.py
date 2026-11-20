@@ -6,6 +6,7 @@ within each scan_set_id; it does not mean scientifically preferred.
 """
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import warnings
@@ -21,6 +22,7 @@ CATALOG_COLUMNS = (
     "diameter_nm", "wash_state", "np_vendor", "mw_g_mol", "mn_g_mol", "pdi",
     "scan_set_id", "scan_type", "energy_region", "scan_type_recorded",
     "beam_center_reflection_mode",
+    "review_status", "reviewed_at_utc", "reviewer", "review_note",
     "saved_at_utc", "run_id", "is_latest", "scan_ids", "polarizations",
     "scan_count", "pair_count", "group_count", "has_angular_fit",
     "schema_version", "git_commit", "git_working_tree_clean",
@@ -64,6 +66,65 @@ def _beam_center_reflection_mode(configuration):
     if isinstance(mode, str) and mode.strip():
         return mode.strip().casefold()
     return "not_recorded"
+
+
+def _export_review_metadata(manifest_path, manifest):
+    """Read a separate review history, failing closed on invalid decisions.
+
+    Old manifests without a status are development exports, never approved.
+    The latest decision must identify the exact unmodified saved manifest.
+    """
+    baseline = manifest.get("review_status", "development")
+    result = {
+        "review_status": baseline if isinstance(baseline, str) and baseline in {"draft", "development"} else "unknown",
+        "reviewed_at_utc": None, "reviewer": None, "review_note": "",
+    }
+    reviews = manifest_path.parent / "reviews"
+    try:
+        if reviews.is_symlink():
+            raise ValueError("Review history is a symbolic link")
+        if reviews.exists() and not reviews.is_dir():
+            raise ValueError("Review history is not a directory")
+        events = sorted(reviews.glob("*.json"))
+        if not events:
+            return result
+        latest = events[-1]
+        if latest.is_symlink():
+            raise ValueError("Review event is a symbolic link")
+        event = json.loads(latest.read_text(encoding="utf-8"))
+        if not isinstance(event, dict) or event.get("schema_version") != 1:
+            raise ValueError("Unrecognized review record")
+        if event.get("event_id") != latest.stem:
+            raise ValueError("Review event identity does not match its filename")
+        if event.get("scan_set_id") != manifest["scan_set_id"]:
+            raise ValueError("Review belongs to a different scan set")
+        digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        if event.get("manifest_sha256") != digest:
+            raise ValueError("Saved manifest has changed since its latest review")
+        status = event.get("status")
+        if status not in {"draft", "approved"}:
+            raise ValueError("Unrecognized review decision")
+        reviewer, note = event.get("reviewer"), event.get("note")
+        if not isinstance(reviewer, str) or not reviewer.strip() or not isinstance(note, str):
+            raise ValueError("Review is missing its reviewer or note")
+        if status == "approved" and not note.strip():
+            raise ValueError("Approval is missing its review note")
+        timestamp = event.get("reviewed_at_utc")
+        if not isinstance(timestamp, str):
+            raise ValueError("Review is missing its timestamp")
+        from datetime import datetime
+        reviewed = datetime.fromisoformat(timestamp)
+        if reviewed.tzinfo is None:
+            raise ValueError("Review timestamp needs a timezone")
+        if not latest.stem.startswith(reviewed.strftime("%Y%m%dT%H%M%S%fZ") + "_"):
+            raise ValueError("Review timestamp does not match its event identity")
+        return {
+            "review_status": status, "reviewed_at_utc": timestamp,
+            "reviewer": reviewer.strip(), "review_note": note.strip(),
+        }
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        result.update(review_status="unknown", review_note=f"Review needs inspection: {error}")
+        return result
 
 
 def _manifest_paths(root, issues):
@@ -177,6 +238,7 @@ def _catalog_row(manifest_path):
         "energy_region": region or None,
         "scan_type_recorded": recorded_type or None,
         "beam_center_reflection_mode": reflection_mode,
+        **_export_review_metadata(manifest_path, manifest),
         "saved_at_utc": saved_at,
         "run_id": manifest_path.parent.parent.name,
         "is_latest": False,
@@ -250,14 +312,16 @@ def select_results(
     catalog, *, latest_only=True, sample_id=None, sample_name=None,
     scan_type=None, energy_region=None, polymer=None, wash_state=None, search=None,
     reflection_mode=None,
+    review_status=None,
 ):
     """Filter a catalog without modifying it or deleting saved versions.
 
     Named metadata filters are case-insensitive exact matches. Each accepts
     a single value or a list/tuple/set of values. Search is a literal,
     case-insensitive substring over the description and sample/scan-set IDs.
-    Latest is determined across the complete catalog BEFORE filtering;
-    filters do not silently substitute an older export for a current one.
+    Review status is selected BEFORE latest: an approved export is not
+    hidden by a newer draft. Latest is then determined within that status
+    selection BEFORE the other filters (including reflection mode).
     reflection_mode=None includes all settings; the string "none" selects
     no reflection and "not_recorded" selects missing/unreadable metadata.
     """
@@ -268,7 +332,17 @@ def select_results(
     required = set(CATALOG_COLUMNS)
     if not required.issubset(catalog.columns):
         raise ValueError("Use the DataFrame returned by build_results_catalog")
-    selected = catalog.loc[catalog["is_latest"]].copy() if latest_only else catalog.copy()
+    selected = catalog.copy()
+    if review_status is not None:
+        values = review_status if isinstance(review_status, (list, tuple, set)) else [review_status]
+        if any(isinstance(value, (dict, list, tuple, set)) for value in values):
+            raise ValueError("review_status: use one value or a flat list of values")
+        accepted = {_text(value).casefold() for value in values}
+        selected = selected.loc[selected["review_status"].isin(accepted)]
+    if latest_only:
+        selected = selected.sort_values(
+            ["saved_at_utc", "manifest_path"], ascending=[False, True], kind="stable",
+        ).drop_duplicates("scan_set_id", keep="first")
     for name, criterion in (
         ("sample_id", sample_id), ("sample_name", sample_name),
         ("scan_type", scan_type), ("energy_region", energy_region),

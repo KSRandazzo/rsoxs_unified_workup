@@ -91,6 +91,10 @@ class PortableReaderTests(unittest.TestCase):
 
     def run_cell(self, cell_id, **settings):
         """Execute the actual notebook source, overriding only user settings."""
+        # These existing reader tests intentionally inspect all historical
+        # exports; the approved-only notebook default is tested separately.
+        if cell_id == "catalog-filter-table":
+            settings.setdefault("REVIEW_STATUS", None)
         tree = ast.parse("".join(self.cells[cell_id]["source"]))
         for statement in tree.body:
             if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
@@ -374,6 +378,73 @@ class PortableReaderTests(unittest.TestCase):
             and any(isinstance(target, ast.Name) and target.id == "CATALOG_COLUMNS" for target in node.targets)
         )
         self.assertEqual(ast.literal_eval(embedded_columns), ast.literal_eval(canonical_columns))
+
+    def test_default_approved_view_and_newer_draft(self):
+        from rsoxs_unified_workup.review import set_export_review_status
+
+        old, _ = self.save_export(timestamp="2026-11-01T12:00:00Z")
+        new, _ = self.save_export(timestamp="2026-11-02T12:00:00Z")
+        path = new / "manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["review_status"] = "draft"
+        path.write_text(json.dumps(manifest))
+        set_export_review_status(old, "approved", reviewer="tester", note="Reviewed plots", confirm=True)
+        before = fingerprints(self.results)
+        with unrelated_working_directory(self.unrelated), blocked_imports():
+            self.browse()
+            # Execute the real default filter, without overriding its status.
+            tree = ast.parse("".join(self.cells["catalog-filter-table"]["source"]))
+            with redirect_stdout(io.StringIO()):
+                exec(compile(tree, "<default approved filter>", "exec"), self.namespace)
+            self.assertEqual(self.namespace["REVIEW_STATUS"], "approved")
+            self.assertEqual(len(self.namespace["view"]), 1)
+            self.run_cell("catalog-filter-table", REVIEW_STATUS="approved", LATEST_ONLY=True)
+            row = self.namespace["view"].iloc[0]
+            self.assertEqual(row.export_directory, str(old))
+            self.assertFalse(row.is_latest)  # newest overall is still a draft
+            self.assertEqual(row.reviewer, "tester")
+            self.run_cell("catalog-selection")
+        self.assertEqual(before, fingerprints(self.results))
+
+    def test_review_statuses_and_invalid_latest_decision(self):
+        from rsoxs_unified_workup.review import set_export_review_status
+
+        old, _ = self.save_export("development")
+        approved, _ = self.save_export("approved")
+        draft, _ = self.save_export("draft")
+        set_export_review_status(approved, "approved", reviewer="tester", note="Checked", confirm=True)
+        set_export_review_status(draft, "approved", reviewer="tester", note="Checked", confirm=True)
+        result = set_export_review_status(draft, "draft", reviewer="tester", note="Needs another mask", confirm=True)
+        with blocked_imports():
+            self.browse()
+            by_id = self.namespace["catalog"].set_index("scan_set_id")
+            self.assertEqual(by_id.loc["development", "review_status"], "development")
+            self.assertEqual(by_id.loc["approved", "review_status"], "approved")
+            self.assertEqual(by_id.loc["draft", "review_status"], "draft")
+        result["review_record"].write_text("broken JSON")
+        with blocked_imports():
+            self.browse()
+            self.run_cell("catalog-filter-table", REVIEW_STATUS="approved")
+            self.assertEqual(set(self.namespace["view"].scan_set_id), {"approved"})
+            by_id = self.namespace["catalog"].set_index("scan_set_id")
+            self.assertEqual(by_id.loc["draft", "review_status"], "unknown")
+
+    def test_changed_manifest_is_not_approved_and_review_filter_lists(self):
+        from rsoxs_unified_workup.review import set_export_review_status
+
+        directory, _ = self.save_export("changed")
+        self.save_export("development")
+        set_export_review_status(directory, "approved", reviewer="tester", note="Checked", confirm=True)
+        path = directory / "manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["git_commit"] = "changed"
+        path.write_text(json.dumps(manifest))
+        with blocked_imports():
+            self.browse()
+            self.run_cell("catalog-filter-table", REVIEW_STATUS="approved")
+            self.assertTrue(self.namespace["view"].empty)
+            self.run_cell("catalog-filter-table", REVIEW_STATUS=["UNKNOWN", "Development"])
+            self.assertEqual(len(self.namespace["view"]), 2)
 
 
 if __name__ == "__main__":
