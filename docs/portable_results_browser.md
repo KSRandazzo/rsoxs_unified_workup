@@ -18,7 +18,9 @@ writer-environment versions are not required. The Zarr reader must support
 the saved version-2 format and standard numcodecs codecs. These exports use
 ordinary Blosc/LZ4 compression and UTF-8 strings, not pickled Python objects.
 Catalog-only browsing needs pandas and Python's standard library; xarray,
-Zarr, and numcodecs are needed for the optional array-opening cell.
+Zarr, and numcodecs are needed to open arrays. The optional plotting cells
+also use NumPy and Matplotlib. These ordinary packages are included in
+`requirements-browse.txt`; no workup or beamline dependencies are required.
 
 ## Notebook sequence
 
@@ -30,9 +32,10 @@ Zarr, and numcodecs are needed for the optional array-opening cell.
    exports. `None` searches for a `results` folder relative to the current
    working directory and its parents. On another machine, set an explicit
    path to your copied results folder. It may contain multiple run folders.
-4. Refresh, filter, and inspect an export. The default `REVIEW_STATUS =
-   "approved"` shows explicitly reviewed exports; use `"draft"`,
-   `"development"`, or None to inspect other statuses. Metadata comes from
+4. Refresh, filter, and inspect an export. The current default
+   `REVIEW_STATUS = None` includes all statuses, including drafts. Choose
+   `"approved"` for explicitly reviewed exports, or `"draft"` or
+   `"development"` for those statuses. Metadata comes from
    its saved manifest and review JSON, never current configuration CSVs/TOMLs.
 5. Optional: set `OPEN_DATASET = True` and `GROUP_NAME` to an exact exported
    group listed by the inspect cell, then run the array-opening cell.
@@ -75,8 +78,10 @@ matching the centering function. Future named settings remain visible.
 Keep `LATEST_ONLY = False` to compare older exports with different reflection
 settings for one scan set. With `True`, review status is selected first, then
 the newest save per scan set within that status, then reflection/other filters.
-A newer draft does not hide an approved result. An older matching reflection
-export is not substituted if the newest approved export fails that filter.
+With `REVIEW_STATUS = "approved"`, a newer draft does not hide an approved
+result. With `REVIEW_STATUS = None`, the newest save wins regardless of its
+review status. An older matching reflection export is not substituted if
+the newest export within the chosen review filter fails that reflection filter.
 
 Review records are append-only and tied to an exact manifest hash. Old exports
 without status metadata are development; they are never automatically approved.
@@ -91,8 +96,9 @@ Configured-center approval without fitting may still record the setting.
 It does not imply that final intensity/anisotropy arrays were reflected.
 The export-inspection cell also prints the selected saved reflection mode.
 
-The browser's kernel metadata now says generic Python, not the environment
-that produced the files. You still choose an installed environment with the
-reader dependencies in your notebook application's kernel selector. Creating
+The saved kernel label may reflect the environment you last selected; it
+does not restrict the reader to the writer environment. Choose an installed
+Python environment with the reader dependencies in your notebook application's
+kernel selector. Creating
 a separate environment is optional; using the existing environment in a
 separate kernel also works, but is no longer a reader requirement.

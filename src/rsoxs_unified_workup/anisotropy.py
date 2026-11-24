@@ -623,6 +623,73 @@ def calculate_global_intensity_ratio(pointwise_results):
     return global_results
 
 
+def summarize_pointwise_energy(
+    pointwise_results, q_range, *, q_reduction="mean",
+    absolute_q_values=True, require_complete_q_range=False,
+):
+    """Two data-derived energy diagnostics, never using periodic fit results.
+
+    Main curve: reduce_q(abs(mean_chi(A))) (or signed chi mean).
+    Companion: reduce_q(mean_chi(abs(A))). Both use identical finite bins
+    and native q windows. All-missing windows remain NaN, including sums.
+    """
+    if q_reduction not in ("mean", "sum"):
+        raise ValueError("q_reduction must be 'mean' or 'sum'")
+    if not isinstance(absolute_q_values, (bool, np.bool_)) or not isinstance(require_complete_q_range, (bool, np.bool_)):
+        raise ValueError("absolute_q_values and require_complete_q_range must be boolean")
+    if (
+        not isinstance(q_range, (tuple, list, np.ndarray)) or np.ndim(q_range) != 1
+        or len(q_range) != 2 or not np.isfinite(q_range).all()
+        or not 0 <= q_range[0] <= q_range[1]
+    ):
+        raise ValueError("q_range must satisfy 0 <= lower <= upper")
+    result = {}
+    for mode, pairs in pointwise_results.items():
+        result[mode] = {}
+        for pair_id, source in pairs.items():
+            values = source["anisotropy"]
+            if set(values.dims) != {"energy", "chi", "q"} or values.attrs.get("q_cap_applied") is not True:
+                raise ValueError("Use measured q-capped pointwise anisotropy with energy, chi, q dimensions, not fit maps")
+            values = values.transpose("energy", "chi", "q")
+            q = values.q.values
+            if not q.size or not np.isfinite(q).all() or not np.all(np.diff(q) > 0):
+                raise ValueError("Native q coordinates must be finite and strictly increasing")
+            if q_range[1] > float(q.max()) + 1e-12:
+                raise ValueError(f"{pair_id}: available q grid is {q.min():g}–{q.max():g} Å⁻¹")
+            window = values.isel(q=np.flatnonzero((q >= q_range[0]) & (q <= q_range[1])))
+            if not window.sizes["q"]:
+                raise ValueError(f"{pair_id}: no native q bins in {q_range}")
+            finite = window.where(np.isfinite(window))
+            chi_mean = finite.mean("chi", skipna=True)
+            magnitude_mean = abs(finite).mean("chi", skipna=True)
+            count = np.isfinite(window).sum("chi")
+            q_count = (count > 0).sum("q")
+            complete = q_count == window.sizes["q"]
+            def reduce_q(array):
+                reduced = (array.mean("q", skipna=True) if q_reduction == "mean"
+                           else array.sum("q", skipna=True, min_count=1))
+                return reduced.where(complete) if require_complete_q_range else reduced
+            main = abs(chi_mean) if absolute_q_values else chi_mean
+            dataset = xr.Dataset({
+                "chi_mean_anisotropy": chi_mean,
+                "mean_abs_pointwise_anisotropy": magnitude_mean,
+                "q_reduced_chi_mean": reduce_q(main),
+                "q_reduced_mean_abs": reduce_q(magnitude_mean),
+                "valid_chi_count": count, "valid_q_count": q_count,
+                "q_window_complete": complete,
+            })
+            dataset.attrs = {
+                "source_product": "pointwise_anisotropy.anisotropy", "q_cap_applied": True,
+                "periodic_fit_used": False, "q_range_requested": list(q_range),
+                "q_range_selected": [float(window.q.min()), float(window.q.max())],
+                "selected_q_bin_count": window.sizes["q"], "q_reduction": q_reduction,
+                "absolute_q_values": bool(absolute_q_values),
+                "require_complete_q_range": bool(require_complete_q_range),
+            }
+            result[mode][pair_id] = dataset
+    return result
+
+
 def summarize_absolute_pointwise_anisotropy(
     pointwise_results,
     q_range,

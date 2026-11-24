@@ -22,8 +22,9 @@ is deliberately different from averaging abs(A) over chi.
 
 Set `Q_RANGE`, `Q_REDUCTION = "mean"` or `"sum"`, and
 `ABSOLUTE_Q_VALUES` in the calculation cell. Both normalization modes are
-calculated. In the plotting cell, set `NORMALIZATION_MODE` and edit the
-`ENERGY_MARKERS_EV` list to position the dotted vertical energy markers.
+calculated. Set `NORMALIZATION_MODE` in the plotting cell. The shared TOML
+`[plotting] energies_ev` list supplies dotted vertical energy markers;
+the centering energy is automatically included for plotting.
 Change calculation options and rerun the calculation and plot cells;
 changing only energy markers requires rerunning just the plot cell.
 
@@ -51,4 +52,7 @@ developed earlier: abs(A) is taken BEFORE the chi mean, complete q-window
 support is required by default, and the plot uses a horizontal reference.
 Their tests cover that distinct definition. The current notebook review
 does NOT call those functions; they should not be mistaken for the
-calculation and vertical-marker plot described above.
+calculation and vertical-marker plot described above. The review-first
+notebook also shows a companion chi-mean abs(A) curve from the same
+pointwise source, using identical finite bins and q windows, with explicit
+q-window coverage. See `review_first_workflow.md` for the updated workflow.

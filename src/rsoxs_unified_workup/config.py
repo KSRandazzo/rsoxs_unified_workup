@@ -32,6 +32,36 @@ STANDARD_SECTORS = {
 }
 
 
+def get_review_energies(processing, *, include_beam_center=True):
+    """Read the shared TOML energy list without changing any settings.
+
+    The independent centering energy is included for plots, but not added
+    to the user's interesting-energy list for angular slice fitting.
+    """
+    plotting = processing.get("plotting", {})
+    if "energy_indices" in plotting:
+        raise ValueError("Replace plotting.energy_indices with plotting.energies_ev")
+    configured = plotting.get("energies_ev")
+    if configured is None:
+        energies = []
+    elif not isinstance(configured, list) or not configured:
+        raise ValueError("plotting.energies_ev must be a nonempty list")
+    else:
+        energies = list(configured)
+    if include_beam_center:
+        fit_energy = processing.get("beam_center_fit", {}).get("fit_energy")
+        if fit_energy is not None:
+            energies.append(fit_energy)
+    if any(
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, (int, float, np.integer, np.floating))
+        or not np.isfinite(value) or value <= 0
+        for value in energies
+    ):
+        raise ValueError("Review energies must be positive, finite numbers in eV")
+    return list(dict.fromkeys(float(value) for value in energies))
+
+
 def uses_compact_scan_sets(columns):
     """The four run-ID columns opt a configuration into generated records."""
     required = set(POLARIZATION_SCAN_COLUMNS.values())

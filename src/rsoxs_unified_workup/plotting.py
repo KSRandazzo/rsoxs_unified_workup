@@ -7,6 +7,7 @@ from rsoxs_unified_workup.config import (
     validate_requested_energies,
     pair_scan_records,
     scan_identity,
+    get_review_energies,
 )
 
 
@@ -30,9 +31,11 @@ def review_energy_indices(scan_record, processing, energy_values):
             "Replace plotting.energy_indices with plotting.energies_ev"
         )
 
-    requested = plotting.get("energies_ev")
+    if plotting.get("energies_ev") is None and scan_record["scan_type"] == "repeats":
+        return list(range(available.size))
+    requested = get_review_energies(processing)
 
-    if requested is None:
+    if not requested:
         if scan_record["scan_type"] == "repeats":
             return list(range(available.size))
 
@@ -3003,6 +3006,9 @@ def plot_angular_anisotropy_map_review(
     slice_fits=None,
     amplitude_percentile=99.0,
     offset_percentile=99.0,
+    *,
+    energy_range_ev=None,
+    energy_markers_ev=None,
 ):
     """Review maps with shared, display-only percentile color limits.
 
@@ -3012,7 +3018,41 @@ def plot_angular_anisotropy_map_review(
     mode. Set either percentile to 100 for full-range colors. Values outside
     the limits retain their fitted values and use endpoint colors; no values
     are removed, refitted, or filled.
+
+    energy_range_ev=(lower, upper) restricts the display to measured energy
+    centers in that inclusive range, using shared color limits calculated
+    within the selected range. None keeps the original full-energy review.
+    energy_markers_ev draws dotted horizontal lines because energy is on the
+    vertical axis. Markers outside the displayed energy range are omitted.
+    The source maps and selected-slice checks remain unchanged.
     """
+    def positive_energy(value):
+        return (
+            not isinstance(value, (bool, np.bool_))
+            and isinstance(value, (int, float, np.integer, np.floating))
+            and np.isfinite(value)
+            and value > 0
+        )
+
+    if energy_range_ev is not None:
+        if (
+            not isinstance(energy_range_ev, (tuple, list, np.ndarray))
+            or np.ndim(energy_range_ev) != 1
+            or len(energy_range_ev) != 2
+            or not all(positive_energy(value) for value in energy_range_ev)
+            or energy_range_ev[0] >= energy_range_ev[1]
+        ):
+            raise ValueError("energy_range_ev must be two positive, finite energies (lower < upper), or None")
+        energy_range_ev = tuple(float(value) for value in energy_range_ev)
+    if energy_markers_ev is None:
+        energy_markers_ev = ()
+    if (
+        not isinstance(energy_markers_ev, (tuple, list, np.ndarray))
+        or np.ndim(energy_markers_ev) != 1
+        or not all(positive_energy(value) for value in energy_markers_ev)
+    ):
+        raise ValueError("energy_markers_ev must be a list of positive, finite energies, or None")
+    energy_markers_ev = tuple(dict.fromkeys(float(value) for value in energy_markers_ev))
     for name, percentile in (
         ("amplitude_percentile", amplitude_percentile),
         ("offset_percentile", offset_percentile),
@@ -3073,25 +3113,45 @@ def plot_angular_anisotropy_map_review(
         np.testing.assert_allclose(phase_error, 0, rtol=0, atol=1e-10)
 
         if slice_fits is not None:
-            reference = slice_fits[normalization_mode][pair_id]
-            if dataset.attrs["q_bins"] != reference["q_bins"]:
-                raise ValueError("The map and selected-slice fits use different q averaging")
-            point = dataset.sel(energy=reference["selected_energy_ev"], q=reference["selected_q"])
-            if not point.fit_success.item():
-                raise ValueError("The selected-slice reference is not fitted in the map")
-            parameters = reference["sinusoid_parameters"]
-            for field in ("offset", "amplitude"):
-                np.testing.assert_allclose(point[field].item(), parameters[field], rtol=1e-10, atol=1e-12)
-            for field in ("rmse", "r_squared"):
-                np.testing.assert_allclose(point[field].item(), reference[field], rtol=1e-10, atol=1e-12, equal_nan=True)
-            if point.valid_chi_count.item() != reference["valid_chi_count"]:
-                raise ValueError("The map and selected slice have different angular coverage")
-            if point.phase_defined.item() != parameters["phase_defined"]:
-                raise ValueError("The map and selected slice disagree about phase being defined")
-            if parameters["phase_defined"]:
-                error = (point.phase_shift_degrees.item() - parameters["phase_shift_degrees"] + 45) % 90 - 45
-                np.testing.assert_allclose(error, 0, rtol=0, atol=1e-8)
-            print(f"{normalization_mode}/{pair_id}: selected-slice parameters, coverage, and errors match the map")
+            references = slice_fits[normalization_mode][pair_id]
+            if isinstance(references, dict):
+                references = [references]
+            for reference in references:
+                if dataset.attrs["q_bins"] != reference["q_bins"]:
+                    raise ValueError("The map and selected-slice fits use different q averaging")
+                point = dataset.sel(energy=reference["selected_energy_ev"], q=reference["selected_q"])
+                if not point.fit_success.item():
+                    raise ValueError("The selected-slice reference is not fitted in the map")
+                parameters = reference["sinusoid_parameters"]
+                for field in ("offset", "amplitude"):
+                    np.testing.assert_allclose(point[field].item(), parameters[field], rtol=1e-10, atol=1e-12)
+                for field in ("rmse", "r_squared"):
+                    np.testing.assert_allclose(point[field].item(), reference[field], rtol=1e-10, atol=1e-12, equal_nan=True)
+                if point.valid_chi_count.item() != reference["valid_chi_count"]:
+                    raise ValueError("The map and selected slice have different angular coverage")
+                if point.phase_defined.item() != parameters["phase_defined"]:
+                    raise ValueError("The map and selected slice disagree about phase being defined")
+                if parameters["phase_defined"]:
+                    error = (point.phase_shift_degrees.item() - parameters["phase_shift_degrees"] + 45) % 90 - 45
+                    np.testing.assert_allclose(error, 0, rtol=0, atol=1e-8)
+                print(f"{normalization_mode}/{pair_id}: selected-slice parameters, coverage, and errors match the map")
+
+    # Validate original maps/references above, even when a reference energy
+    # falls outside the requested display window. Never change the fit data.
+    if energy_range_ev is not None:
+        lower, upper = energy_range_ev
+        selected_pairs = {}
+        for pair_id, dataset in pairs.items():
+            energies = dataset.energy.values
+            selected = np.flatnonzero((energies >= lower) & (energies <= upper))
+            if not selected.size:
+                raise ValueError(
+                    f"{pair_id}: no measured energy bins in {lower:g}–{upper:g} eV; "
+                    f"available energy range is {float(np.min(energies)):g}–{float(np.max(energies)):g} eV"
+                )
+            selected_pairs[pair_id] = dataset.isel(energy=selected)
+        pairs = selected_pairs
+        print(f"\nDisplay energy window: {lower:g}–{upper:g} eV (inclusive measured bin centers)")
 
     def finite_max(field, absolute=False):
         maximum = 0.0
@@ -3141,6 +3201,21 @@ def plot_angular_anisotropy_map_review(
         successful = int(dataset.fit_success.sum().item())
         defined_count = int(dataset.phase_defined.sum().item())
         print(f"\n{normalization_mode}/{pair_id}: {successful:,} fitted points; {defined_count:,} numerically defined phases")
+        if energy_range_ev is not None:
+            print(
+                f"  Showing {dataset.sizes['energy']} measured energies: "
+                f"{float(dataset.energy.min()):g}–{float(dataset.energy.max()):g} eV; no refitting"
+            )
+        marker_bounds = energy_range_ev or (
+            float(dataset.energy.min()), float(dataset.energy.max())
+        )
+        visible_markers = [
+            energy for energy in energy_markers_ev
+            if marker_bounds[0] <= energy <= marker_bounds[1]
+        ]
+        omitted_markers = [energy for energy in energy_markers_ev if energy not in visible_markers]
+        if omitted_markers:
+            print(f"  Energy markers outside the displayed range omitted: {omitted_markers}")
         print("  Phase is not an uncertainty estimate. Interpret weak-amplitude/low-R² phases cautiously.")
         print("  Blank parameter pixels were not fitted, or phase was numerically undefined; no gaps are filled.")
         with plt.style.context("dark_background"):
@@ -3157,6 +3232,15 @@ def plot_angular_anisotropy_map_review(
                 axis.set_title(title)
                 axis.set_xlabel("q (Å⁻¹)")
                 axis.set_ylabel("Energy (eV)")
+                for energy in visible_markers:
+                    axis.axhline(
+                        energy, color="white", linestyle=":", linewidth=1,
+                        label=f"{energy:g} eV", zorder=3,
+                    )
+                if visible_markers:
+                    axis.legend(loc="upper right", fontsize=8)
+                if energy_range_ev is not None:
+                    axis.set_ylim(*energy_range_ev)
                 extend = "neither"
                 if field in ("amplitude", "offset"):
                     finite = values.values[np.isfinite(values.values)]
@@ -3176,14 +3260,131 @@ def plot_angular_anisotropy_map_review(
                     colorbar.set_label(f"Display limits: ±P{offset_percentile:g}(|offset|)")
                 if field == "phase_shift_degrees":
                     colorbar.set_ticks([0, 22.5, 45, 67.5, 90])
+            window_description = (
+                f"Display energy window: {energy_range_ev[0]:g}–{energy_range_ev[1]:g} eV\n"
+                if energy_range_ev is not None else ""
+            )
             fig.suptitle(
                 f"Fixed-90° sinusoid parameter maps: {pair_id}\n"
                 f"{normalization_mode.replace('_', ' ')} normalization; "
                 f"centered mean over {dataset.attrs['q_bins']} q bins; native pair grid\n"
+                f"{window_description}"
                 "Fit-quality maps accompany the parameters; phase colors are circular"
             )
             plt.show()
             plt.close(fig)
+
+
+def plot_pointwise_energy_diagnostics(summary_results, normalization_mode="half_ring", energy_markers_ev=None):
+    """Plot both direct-data energy diagnostics and the shared q coverage."""
+    for pair_id, original in summary_results[normalization_mode].items():
+        dataset = original.sortby("energy")
+        if dataset.attrs.get("periodic_fit_used") is not False:
+            raise ValueError("Energy diagnostics must come directly from pointwise data, not periodic fits")
+        reduction = dataset.attrs["q_reduction"]
+        main_label = "|chi-mean A|" if dataset.attrs["absolute_q_values"] else "chi-mean A"
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(2, 1, figsize=(11, 8), sharex=True, constrained_layout=True)
+            axes[0].plot(dataset.energy, dataset.q_reduced_chi_mean, marker=".", label=f"{reduction} over q of {main_label}")
+            axes[0].plot(dataset.energy, dataset.q_reduced_mean_abs, marker=".", label=f"{reduction} over q of chi-mean |A| (companion)")
+            axes[0].set_ylabel("Data-derived anisotropy summary")
+            axes[0].legend()
+            axes[1].step(dataset.energy, dataset.valid_q_count, where="mid", label="Contributing q bins")
+            axes[1].axhline(dataset.attrs["selected_q_bin_count"], color="gray", linestyle="--", label="Complete q window")
+            axes[1].set_ylabel("Contributing q bins")
+            axes[1].set_xlabel("Energy (eV)")
+            for axis in axes:
+                for energy in energy_markers_ev or []:
+                    axis.axvline(energy, color="gray", linestyle=":", linewidth=1, label=f"{energy:g} eV")
+            axes[1].legend()
+            lower, upper = dataset.attrs["q_range_requested"]
+            fig.suptitle(f"{pair_id}; {normalization_mode}; q={lower:g}–{upper:g} Å⁻¹\n"
+                         "Measured pointwise A only; no periodic fitting or smoothing")
+            if not dataset.attrs["require_complete_q_range"]:
+                print(f"{pair_id}: partial q windows allowed; inspect the coverage plot when selecting energies.")
+            plt.show()
+            plt.close(fig)
+
+
+def plot_anisotropy_robustness_overview(
+    pointwise_averaged_results, sector_averaged_results, global_results,
+    normalization_mode="half_ring", energy_markers_ev=None, anisotropy_limit=0.15,
+):
+    """Compare all energies before fitting; different estimators need not agree exactly."""
+    methods = (("Mean pointwise A", pointwise_averaged_results),
+               ("Mean sector A", sector_averaged_results),
+               ("Global intensity-ratio A", global_results))
+    pairs = global_results[normalization_mode]
+    for _, results in methods:
+        if set(results[normalization_mode]) != set(pairs):
+            raise ValueError("Robustness review requires matching polarization pairs")
+    for pair_id in pairs:
+        reference = pairs[pair_id]["anisotropy"].sortby("energy")
+        with plt.style.context("dark_background"):
+            fig, axes = plt.subplots(1, 3, figsize=(19, 6), sharey=True, constrained_layout=True)
+            for axis, (label, results) in zip(axes, methods):
+                values = results[normalization_mode][pair_id]["anisotropy"].sortby("energy").transpose("energy", "q")
+                for coordinate in ("energy", "q"):
+                    np.testing.assert_array_equal(values[coordinate], reference[coordinate])
+                image = axis.pcolormesh(values.q, values.energy, np.ma.masked_invalid(values.values),
+                                       shading="nearest", cmap="coolwarm", vmin=-anisotropy_limit, vmax=anisotropy_limit)
+                for energy in energy_markers_ev or []:
+                    axis.axhline(energy, color="white", linestyle=":", linewidth=1)
+                axis.set(xlabel="q (Å⁻¹)", ylabel="Energy (eV)", title=label)
+                fig.colorbar(image, ax=axis, label="Anisotropy")
+            fig.suptitle(f"{pair_id}; {normalization_mode}\n"
+                         "Data-derived estimators: check features/coverage, not exact equality")
+            plt.show()
+            plt.close(fig)
+
+
+def refresh_selected_energy_reviews(
+    configuration, scans, pointwise_results, pointwise_averaged_results,
+    sector_results, sector_averaged_results, global_results,
+    normalization_mode="half_ring", include_image_reviews=True,
+    saturation_masks=None,
+):
+    """Refresh selected-energy figures without loading, integrating, or fitting."""
+    processing = configuration["processing"]
+    if include_image_reviews:
+        plot_raw_frames(scans, processing)
+        if saturation_masks is None:
+            raise ValueError("Supply the existing saturation_masks for image reviews")
+        plot_saturation_overlays(scans, saturation_masks, processing)
+        plot_final_masked_frames(scans, processing)
+        for record in scans.values():
+            plot_integration_review(record, processing)
+            plot_dark_integration_review(record, processing)
+        plot_normalization_review(scans, processing)
+        plot_flux_correction_review(scans, processing)
+    plot_ring_mean_intensity_review(scans, processing)
+    plot_pointwise_anisotropy_review(scans, pointwise_results, processing)
+    plot_chi_averaged_pointwise_review(scans, pointwise_results,
+                                     {normalization_mode: pointwise_averaged_results[normalization_mode]}, processing)
+    plot_sector_anisotropy_review(scans, {normalization_mode: sector_results[normalization_mode]})
+    for energy in get_review_energies(processing):
+        plot_anisotropy_sector_overlays(scans, configuration, sector_results, energy_value=energy)
+    plot_sector_averaged_anisotropy_review(scans, sector_results,
+                                         {normalization_mode: sector_averaged_results[normalization_mode]}, processing)
+    plot_global_intensity_ratio_review(scans, pointwise_results,
+                                      {normalization_mode: global_results[normalization_mode]}, processing)
+    plot_anisotropy_method_comparison(scans, pointwise_averaged_results, sector_averaged_results,
+                                     {normalization_mode: global_results[normalization_mode]}, processing)
+
+
+def plot_review_energy_waveforms(energy_reviews, normalization_mode="half_ring"):
+    """One combined sinusoid/triangle review per requested energy and pair."""
+    for pair_id, entries in energy_reviews[normalization_mode].items():
+        for entry in entries:
+            energy = entry["requested_energy_ev"]
+            if entry["status"] != "fitted":
+                print(f"{normalization_mode}/{pair_id}: {energy:g} eV NOT FITTED: {entry['reason']}")
+                continue
+            actual = entry["selected_energy_ev"]
+            print(f"Requested {energy:g} eV -> selected measured {actual:g} eV")
+            plot_angular_waveform_comparison_review(
+                {normalization_mode: {pair_id: entry["comparison"]}}, normalization_mode=normalization_mode,
+            )
 
 
 def plot_absolute_pointwise_energy_review(

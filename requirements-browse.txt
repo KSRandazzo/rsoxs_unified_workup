@@ -1,5 +1,7 @@
 # Independent saved-results reader: no workup/beamline package required.
 pandas
+numpy
+matplotlib
 xarray
 zarr>=2.18,<3
 numcodecs

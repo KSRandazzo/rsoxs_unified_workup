@@ -24,6 +24,7 @@ FORBIDDEN_IMPORTS = {
     "rsoxs_unified_workup", "PyHyperScattering", "pyFAI", "tiled",
     "joblib", "scipy", "matplotlib", "skimage",
 }
+PROCESSING_IMPORTS = FORBIDDEN_IMPORTS - {"matplotlib"}
 
 
 @contextmanager
@@ -92,7 +93,7 @@ class PortableReaderTests(unittest.TestCase):
     def run_cell(self, cell_id, **settings):
         """Execute the actual notebook source, overriding only user settings."""
         # These existing reader tests intentionally inspect all historical
-        # exports; the approved-only notebook default is tested separately.
+        # exports; the notebook's default filter is tested separately.
         if cell_id == "catalog-filter-table":
             settings.setdefault("REVIEW_STATUS", None)
         tree = ast.parse("".join(self.cells[cell_id]["source"]))
@@ -181,11 +182,16 @@ class PortableReaderTests(unittest.TestCase):
             # Saved execution/output state is allowed. Running and saving the
             # notebook must not fail a test of its independent reader code.
             tree = ast.parse("".join(cell["source"]))
+            forbidden = (
+                PROCESSING_IMPORTS
+                if cell["id"] != "portable-reader-setup"
+                else FORBIDDEN_IMPORTS
+            )
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
-                    self.assertFalse({alias.name.split(".")[0] for alias in node.names} & FORBIDDEN_IMPORTS)
+                    self.assertFalse({alias.name.split(".")[0] for alias in node.names} & forbidden)
                 elif isinstance(node, ast.ImportFrom):
-                    self.assertNotIn((node.module or "").split(".")[0], FORBIDDEN_IMPORTS)
+                    self.assertNotIn((node.module or "").split(".")[0], forbidden)
         setup = "".join(self.cells["portable-reader-setup"]["source"])
         self.assertNotIn("__file__", setup)
         self.assertNotIn("sys.path", setup)
@@ -209,6 +215,15 @@ class PortableReaderTests(unittest.TestCase):
         self.assertEqual((oxygen.scan_type, oxygen.energy_region), ("long", "O"))
         self.assertNotIn("selected_dataset", self.namespace)
         self.assertEqual(before, fingerprints(self.results))
+
+    def test_optional_plotting_dependencies_are_declared(self):
+        declared = {
+            line.strip().split(">=")[0]
+            for line in (ROOT / "requirements-browse.txt").read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        self.assertTrue({"pandas", "numpy", "matplotlib", "xarray", "zarr", "numcodecs"} <= declared)
+        self.assertFalse(PROCESSING_IMPORTS & declared)
 
     def test_all_versions_filters_and_selection_staleness(self):
         self.save_export(timestamp="2026-11-01T12:00:00Z")
@@ -379,7 +394,7 @@ class PortableReaderTests(unittest.TestCase):
         )
         self.assertEqual(ast.literal_eval(embedded_columns), ast.literal_eval(canonical_columns))
 
-    def test_default_approved_view_and_newer_draft(self):
+    def test_default_all_status_view_and_explicit_approved_filter(self):
         from rsoxs_unified_workup.review import set_export_review_status
 
         old, _ = self.save_export(timestamp="2026-11-01T12:00:00Z")
@@ -395,9 +410,13 @@ class PortableReaderTests(unittest.TestCase):
             # Execute the real default filter, without overriding its status.
             tree = ast.parse("".join(self.cells["catalog-filter-table"]["source"]))
             with redirect_stdout(io.StringIO()):
-                exec(compile(tree, "<default approved filter>", "exec"), self.namespace)
-            self.assertEqual(self.namespace["REVIEW_STATUS"], "approved")
+                exec(compile(tree, "<default all-status filter>", "exec"), self.namespace)
+            self.assertIsNone(self.namespace["REVIEW_STATUS"])
             self.assertEqual(len(self.namespace["view"]), 1)
+            latest = self.namespace["view"].iloc[0]
+            self.assertEqual(latest.export_directory, str(new))
+            self.assertEqual(latest.review_status, "draft")
+            self.assertTrue(latest.is_latest)
             self.run_cell("catalog-filter-table", REVIEW_STATUS="approved", LATEST_ONLY=True)
             row = self.namespace["view"].iloc[0]
             self.assertEqual(row.export_directory, str(old))

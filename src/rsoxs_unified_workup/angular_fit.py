@@ -781,6 +781,54 @@ def fit_pointwise_angular_map(data, q_cap, settings, progress=False, description
     return dataset
 
 
+def fit_review_energy_waveforms(configuration, scans, pointwise_results):
+    """Compare sinusoid/triangle at every configured interesting energy.
+
+    Keep pair IDs and actual/requested energies separate. Ineligible q
+    windows or missing angular data are reported explicitly, never fitted
+    from extrapolated or invented data. Both normalization modes are kept.
+    """
+    from rsoxs_unified_workup.config import get_review_energies, pair_scan_records
+    settings = dict(configuration["processing"]["angular_anisotropy_fit"])
+    if (settings.get("period_degrees") != 90 or settings.get("harmonics") != 1
+        or isinstance(settings.get("harmonics"), (bool, np.bool_))):
+        raise ValueError("Selected-energy waveform reviews require period_degrees=90 and harmonics=1")
+    bins = settings.get("q_bins", 1)
+    target = settings.get("q_value")
+    if isinstance(bins, (bool, np.bool_)) or not isinstance(bins, (int, np.integer)) or bins < 1 or bins % 2 == 0:
+        raise ValueError("angular_anisotropy_fit.q_bins must be a positive odd integer")
+    if isinstance(target, (bool, np.bool_)) or not isinstance(target, (int, float, np.integer, np.floating)) or not np.isfinite(target) or target <= 0:
+        raise ValueError("angular_anisotropy_fit.q_value must be positive and finite")
+    energies = get_review_energies(configuration["processing"], include_beam_center=False)
+    if not energies:
+        raise ValueError("Set [plotting] energies_ev for the interesting-energy waveform review")
+    pairs = {pair["pair_id"]: pair for pair in configuration["polarization_pairs"]}
+    results = {}
+    for mode, pair_results in pointwise_results.items():
+        results[mode] = {}
+        for pair_id, source in pair_results.items():
+            records = pair_scan_records(configuration, pairs[pair_id])
+            caps = [scans[record["polarization_deg"]]["integration"]["q_cap"] for record in records]
+            cap = xr.concat(caps, dim="pair_member", join="exact").min("pair_member", skipna=False)
+            entries = []
+            for energy in energies:
+                current = {**settings, "energy_ev": energy}
+                entry = {"requested_energy_ev": energy, "status": "not_fitted",
+                         "reason": "", "sinusoid": None, "comparison": None}
+                try:
+                    reference = fit_pointwise_angular_slice(source["anisotropy"], cap, current)
+                    reference.update(normalization_mode=mode, pair_id=pair_id)
+                    comparison = fit_fixed_90_waveforms({mode: {pair_id: reference}})[mode][pair_id]
+                except ValueError as error:
+                    entry["reason"] = str(error)
+                else:
+                    entry.update(status="fitted", selected_energy_ev=reference["selected_energy_ev"],
+                                 sinusoid=reference, comparison=comparison)
+                entries.append(entry)
+            results[mode][pair_id] = entries
+    return results
+
+
 def fit_scan_set_angular_maps(configuration, scans, pointwise_results, progress=True):
     """Fit both normalization modes separately on each pair's native grid."""
     from rsoxs_unified_workup.config import get_mask_pairs

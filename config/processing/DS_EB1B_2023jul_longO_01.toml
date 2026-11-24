@@ -27,13 +27,13 @@ saturation_search_width = 90
 outer_usable_radius = 445
 
 [beam_centers.DS_EB1B_2023jul_longO_01_pair_0_90]
-center_x = 450.55
-center_y = 504.7
+center_x = 450.65
+center_y = 505.1
 
 [beam_center_fit]
 coarse_search_radius = 4
 coarse_step = 1
-fine_search_radius = 0.8
+fine_search_radius = 0.5
 fine_step = 0.1
 # Inspect the fringe at fit_energy before relying on the center fit.
 fit_energy = 535.0
@@ -41,7 +41,7 @@ q_target = 0.033
 q_window_halfwidth = 0.003
 chi_half_width_degrees = 45
 postmask_threshold = 1.0
-reflection_mode = "fourfold"
+reflection_mode = "none"
 apply_postmask = true
 
 [runtime]

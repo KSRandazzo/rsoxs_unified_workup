@@ -29,8 +29,12 @@ markers aid comparison. See [energy-summary instructions](docs/absolute_pointwis
 
 Saved data and figures live under `results/`, which is excluded from Git.
 New exports are drafts; explicit per-export review makes them approved. The
-browser defaults to approved results. Historical workflow-development exports
+browser currently defaults to all review statuses so drafts are visible;
+select `REVIEW_STATUS = "approved"` for approved-only browsing. Historical workflow-development exports
 can be segregated under `results_development/` without deletion. See
 [results review and development archives](docs/results_review.md).
 Both result locations require a separate backup; Git does not store their data.
 Committing code/configuration does not back up those exports.
+
+Generated HTML report snapshots live under `reports/`, also excluded from
+Git. They do not refresh automatically; retain a separate backup if needed.
